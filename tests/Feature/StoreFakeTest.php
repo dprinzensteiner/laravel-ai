@@ -1,6 +1,7 @@
 <?php
 
 use Illuminate\Support\Collection;
+use Laravel\Ai\Ai;
 use Laravel\Ai\Contracts\Files\StorableFile;
 use Laravel\Ai\Files;
 use Laravel\Ai\Files\Document;
@@ -147,6 +148,42 @@ describe('file operations', function () {
             fn (StorableFile $file) => $file->content() === 'Hello, world!'
         );
     });
+
+    test('direct-upload providers add storable files without storing a provider file', function () {
+        config(['ai.providers.mistral' => [
+            ...config('ai.providers.mistral'),
+            'key' => 'test-key',
+        ]]);
+
+        Stores::fake();
+
+        $store = Stores::create('My Store', provider: 'mistral');
+
+        $response = $store->add(Document::fromString('Hello, world!', 'text/plain')->as('hello.txt'));
+
+        expect($response->id)->toBe(Files::fakeId('hello.txt'))
+            ->and($response->fileId)->toBeNull();
+
+        $store->assertAdded('hello.txt');
+        $store->assertAdded(fn (StorableFile $file) => $file->content() === 'Hello, world!');
+
+        Files::assertNothingStored();
+    });
+
+    test('direct-upload providers add storable files matched by facade-level string id assertions', function () {
+        config(['ai.providers.mistral' => [
+            ...config('ai.providers.mistral'),
+            'key' => 'test-key',
+        ]]);
+
+        Stores::fake();
+
+        $store = Stores::create('My Store', provider: 'mistral');
+
+        $store->add(Document::fromString('Hello, world!', 'text/plain')->as('hello.txt'));
+
+        Ai::assertFileAddedToStore(Stores::fakeId('My Store'), 'hello.txt');
+    });
 });
 
 describe('file assertions', function () {
@@ -189,6 +226,20 @@ describe('file assertions', function () {
         $store->add($file);
 
         $store->assertNotAdded(fn ($f) => $f instanceof ProviderDocument && $f->id() === 'file_456');
+    });
+
+    test('nameless storable files are distinguished by their contents', function () {
+        Stores::fake();
+
+        $store = Stores::create('My Store');
+
+        $store->add(Document::fromString('First document', 'text/plain'));
+        $store->add(Document::fromString('Second document', 'text/plain'));
+
+        // Distinct nameless documents no longer collide onto a single fake id...
+        $store->assertAdded('First document');
+        $store->assertAdded('Second document');
+        $store->assertNotAdded('Third document');
     });
 
     test('can assert file removed from store', function () {
