@@ -82,7 +82,7 @@ class MistralStoreGateway implements StoreGateway, UploadsDocuments
     /**
      * Upload a document's contents directly into the library.
      *
-     * Mistral document uploads do not accept custom metadata; it is ignored.
+     * Mistral document uploads do not accept metadata, so it is applied as document attributes afterwards.
      */
     public function uploadDocument(
         StoreProvider $provider,
@@ -99,7 +99,18 @@ class MistralStoreGateway implements StoreGateway, UploadsDocuments
                 ->post("libraries/{$storeId}/documents", [])
         );
 
-        return $response->json('id');
+        $documentId = $response->json('id');
+
+        if (filled($metadata)) {
+            $this->withErrorHandling(
+                $provider->name(),
+                fn () => $this->client($provider)->patch("libraries/{$storeId}/documents/{$documentId}", [
+                    'attributes' => $metadata,
+                ])
+            );
+        }
+
+        return $documentId;
     }
 
     /**
@@ -142,22 +153,27 @@ class MistralStoreGateway implements StoreGateway, UploadsDocuments
         $page = 0;
 
         do {
-            $pageDocuments = $this->withErrorHandling(
+            $response = $this->withErrorHandling(
                 $provider->name(),
                 fn () => $this->client($provider)->get("libraries/{$storeId}/documents", [
                     'page' => $page,
                     'page_size' => $pageSize,
                 ])
-            )->json('data', []);
+            );
+
+            $pageDocuments = $response->json('data', []);
 
             $documents = $documents->merge($pageDocuments);
 
+            $hasMore = filled($pageDocuments)
+                && $response->json('pagination.has_more', count($pageDocuments) === $pageSize);
+
             $page++;
-        } while (count($pageDocuments) === $pageSize);
+        } while ($hasMore);
 
         $statuses = $documents->countBy(fn (array $document) => match ($document['process_status'] ?? null) {
             'done' => 'completed',
-            'error' => 'failed',
+            'error', 'missing_content' => 'failed',
             default => 'pending',
         });
 

@@ -1,7 +1,11 @@
 <?php
 
 use Illuminate\Http\Client\Request;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
+use Laravel\Ai\Events\AddingFileToStore;
+use Laravel\Ai\Events\FileAddedToStore;
 use Laravel\Ai\Files\Document;
 use Laravel\Ai\Stores;
 
@@ -124,6 +128,68 @@ test('get store paginates every document even when nb_documents is stale', funct
     expect($store->fileCounts->completed)->toBe(103);
 });
 
+test('get store stops paginating when the api reports no more pages', function () {
+    $fullPage = collect(range(1, 100))->map(fn (int $i) => [
+        'id' => "doc-{$i}",
+        'process_status' => 'done',
+    ])->all();
+
+    Http::fake([
+        'api.mistral.ai/v1/libraries/lib-123/documents*' => Http::response([
+            'pagination' => ['total_items' => 100, 'total_pages' => 1, 'current_page' => 0, 'page_size' => 100, 'has_more' => false],
+            'data' => $fullPage,
+        ]),
+        'api.mistral.ai/v1/libraries/lib-123' => Http::response(fakeMistralLibraryResponse(nbDocuments: 100)),
+    ]);
+
+    $store = Stores::get('lib-123', provider: 'mistral');
+
+    expect($store->fileCounts->completed)->toBe(100);
+
+    // One library request and a single documents page...
+    Http::assertSentCount(2);
+});
+
+test('get store keeps paginating while the api reports more pages', function () {
+    Http::fake([
+        'api.mistral.ai/v1/libraries/lib-123/documents*' => function (Request $request) {
+            $page = (int) $request->uri()->query()->get('page', 0);
+
+            return Http::response([
+                'pagination' => ['total_items' => 2, 'total_pages' => 2, 'current_page' => $page, 'page_size' => 100, 'has_more' => $page === 0],
+                'data' => [['id' => "doc-{$page}", 'process_status' => $page === 0 ? 'done' : 'in_progress']],
+            ]);
+        },
+        'api.mistral.ai/v1/libraries/lib-123' => Http::response(fakeMistralLibraryResponse(nbDocuments: 2)),
+    ]);
+
+    $store = Stores::get('lib-123', provider: 'mistral');
+
+    expect($store->fileCounts->completed)->toBe(1)
+        ->and($store->fileCounts->pending)->toBe(1);
+
+    Http::assertSentCount(3);
+});
+
+test('get store counts documents with missing content as failed', function () {
+    Http::fake([
+        'api.mistral.ai/v1/libraries/lib-123/documents*' => Http::response([
+            'data' => [
+                ['id' => 'doc-1', 'process_status' => 'missing_content'],
+                ['id' => 'doc-2', 'process_status' => 'waiting_for_capacity'],
+                ['id' => 'doc-3', 'process_status' => 'todo'],
+            ],
+        ]),
+        'api.mistral.ai/v1/libraries/lib-123' => Http::response(fakeMistralLibraryResponse(nbDocuments: 3)),
+    ]);
+
+    $store = Stores::get('lib-123', provider: 'mistral');
+
+    expect($store->fileCounts->completed)->toBe(0)
+        ->and($store->fileCounts->pending)->toBe(2)
+        ->and($store->fileCounts->failed)->toBe(1);
+});
+
 test('create store posts name and description', function () {
     Http::fake([
         'api.mistral.ai/v1/libraries' => Http::response(fakeMistralLibraryResponse()),
@@ -235,18 +301,95 @@ test('adding a storable file uploads it directly to the library', function () {
     Http::assertNotSent(fn (Request $request) => str_ends_with($request->url(), '/v1/files'));
 });
 
-test('adding a storable file ignores unsupported metadata', function () {
+test('adding a storable file with metadata patches the document attributes', function () {
     Http::fake([
+        'api.mistral.ai/v1/libraries/lib-123/documents/doc-1' => Http::response([
+            'id' => 'doc-1',
+            'attributes' => ['team' => 'laravel'],
+        ]),
         'api.mistral.ai/v1/libraries/lib-123/documents' => Http::response([
             'id' => 'doc-1',
             'process_status' => 'in_progress',
-        ]),
+        ], 201),
+        'api.mistral.ai/v1/libraries/lib-123' => Http::response(fakeMistralLibraryResponse()),
+    ]);
+
+    $response = Stores::get('lib-123', provider: 'mistral')
+        ->add(Document::fromString('Hello, world!', 'text/plain')->as('hello.txt'), metadata: ['team' => 'laravel', 'year' => 2026]);
+
+    expect($response->id)->toBe('doc-1');
+
+    // The multipart upload itself only carries the file...
+    Http::assertSent(fn (Request $request) => $request->method() === 'POST'
+        && str_ends_with($request->url(), '/libraries/lib-123/documents')
+        && collect($request->data())->pluck('name')->all() === ['file']);
+
+    Http::assertSent(fn (Request $request) => $request->method() === 'PATCH'
+        && $request->url() === 'https://api.mistral.ai/v1/libraries/lib-123/documents/doc-1'
+        && $request['attributes'] === ['team' => 'laravel', 'year' => 2026]);
+});
+
+test('adding a storable file without metadata does not patch the document', function () {
+    Http::fake([
+        'api.mistral.ai/v1/libraries/lib-123/documents' => Http::response(['id' => 'doc-1'], 201),
         'api.mistral.ai/v1/libraries/lib-123' => Http::response(fakeMistralLibraryResponse()),
     ]);
 
     Stores::get('lib-123', provider: 'mistral')
-        ->add(Document::fromString('Hello, world!', 'text/plain')->as('hello.txt'), metadata: ['team' => 'laravel']);
+        ->add(Document::fromString('Hello, world!', 'text/plain')->as('hello.txt'));
 
-    Http::assertSent(fn (Request $request) => str_ends_with($request->url(), '/libraries/lib-123/documents')
-        && collect($request->data())->pluck('name')->all() === ['file']);
+    Http::assertNotSent(fn (Request $request) => $request->method() === 'PATCH');
+});
+
+test('adding an uploaded file uploads it directly to the library', function () {
+    Http::fake([
+        'api.mistral.ai/v1/libraries/lib-123/documents' => Http::response(['id' => 'doc-1'], 201),
+        'api.mistral.ai/v1/libraries/lib-123' => Http::response(fakeMistralLibraryResponse()),
+    ]);
+
+    $response = Stores::get('lib-123', provider: 'mistral')
+        ->add(UploadedFile::fake()->createWithContent('report.txt', 'Quarterly report'));
+
+    expect($response->id)->toBe('doc-1');
+
+    Http::assertSent(fn (Request $request) => $request->method() === 'POST'
+        && $request->url() === 'https://api.mistral.ai/v1/libraries/lib-123/documents'
+        && collect($request->data())->contains(fn ($part) => $part['name'] === 'file'
+            && ($part['filename'] ?? null) === 'report.txt'
+            && $part['contents'] === 'Quarterly report'));
+});
+
+test('adding a storable file dispatches the store file events', function () {
+    Event::fake([AddingFileToStore::class, FileAddedToStore::class]);
+
+    Http::fake([
+        'api.mistral.ai/v1/libraries/lib-123/documents' => Http::response(['id' => 'doc-1'], 201),
+        'api.mistral.ai/v1/libraries/lib-123' => Http::response(fakeMistralLibraryResponse()),
+    ]);
+
+    Stores::get('lib-123', provider: 'mistral')
+        ->add(Document::fromString('Hello, world!', 'text/plain')->as('hello.txt'));
+
+    Event::assertDispatched(fn (AddingFileToStore $event) => $event->storeId === 'lib-123'
+        && $event->fileId === 'hello.txt');
+
+    Event::assertDispatched(fn (FileAddedToStore $event) => $event->storeId === 'lib-123'
+        && $event->fileId === 'hello.txt'
+        && $event->documentId === 'doc-1');
+});
+
+test('removing a document with file deletion does not call the files api', function () {
+    Http::fake([
+        'api.mistral.ai/v1/libraries/lib-123' => Http::response(fakeMistralLibraryResponse()),
+        'api.mistral.ai/v1/libraries/lib-123/documents/doc-1' => Http::response([], 204),
+    ]);
+
+    $removed = Stores::get('lib-123', provider: 'mistral')->remove('doc-1', deleteFile: true);
+
+    expect($removed)->toBeTrue();
+
+    Http::assertSent(fn (Request $request) => $request->method() === 'DELETE'
+        && $request->url() === 'https://api.mistral.ai/v1/libraries/lib-123/documents/doc-1');
+
+    Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/v1/files'));
 });

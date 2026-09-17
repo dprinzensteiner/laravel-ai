@@ -6,6 +6,7 @@ use Illuminate\Support\Arr;
 use Laravel\Ai\Attributes\Strict;
 use Laravel\Ai\Contracts\Providers\SupportsFileSearch;
 use Laravel\Ai\Contracts\Tool;
+use Laravel\Ai\Files\ProviderDocument;
 use Laravel\Ai\Gateway\TextGenerationOptions;
 use Laravel\Ai\Messages\AssistantMessage;
 use Laravel\Ai\Messages\Message;
@@ -15,6 +16,7 @@ use Laravel\Ai\Messages\UserMessage;
 use Laravel\Ai\Providers\Provider;
 use Laravel\Ai\Providers\Tools\FileSearch;
 use Laravel\Ai\Providers\Tools\ProviderTool;
+use Laravel\Ai\ToolChoice;
 use RuntimeException;
 
 trait BuildsConversationRequests
@@ -48,6 +50,7 @@ trait BuildsConversationRequests
             'top_p' => $options?->topP,
             'max_tokens' => $options?->maxTokens,
             'response_format' => filled($schema) ? $this->buildResponseFormat($schema, Strict::isAppliedTo($options?->agent)) : null,
+            'tool_choice' => $options?->toolChoice instanceof ToolChoice ? $this->mapConversationToolChoice($options->toolChoice) : null,
         ]);
 
         if (filled($completionArgs)) {
@@ -91,6 +94,18 @@ trait BuildsConversationRequests
     }
 
     /**
+     * Map the given tool choice to a Conversations API tool choice mode.
+     */
+    protected function mapConversationToolChoice(ToolChoice $choice): string
+    {
+        if ($choice->mode === ToolChoice::tool) {
+            throw new RuntimeException('Mistral does not support forcing a specific tool when using file search.');
+        }
+
+        return $choice->mode;
+    }
+
+    /**
      * Map the given Laravel messages to Conversations API input entries.
      */
     protected function mapMessagesToConversationInputs(array $messages): array
@@ -115,13 +130,25 @@ trait BuildsConversationRequests
      */
     protected function mapUserConversationInput(UserMessage|Message $message, array &$inputs): void
     {
-        if ($message instanceof UserMessage && $message->attachments->isNotEmpty()) {
-            throw new RuntimeException('Mistral does not support attachments when using file search.');
+        if (! $message instanceof UserMessage || $message->attachments->isEmpty()) {
+            $inputs[] = [
+                'role' => 'user',
+                'content' => $message->content,
+            ];
+
+            return;
+        }
+
+        if ($message->attachments->contains(fn ($attachment): bool => $attachment instanceof ProviderDocument)) {
+            throw new RuntimeException('Mistral does not support stored provider document attachments when using file search.');
         }
 
         $inputs[] = [
             'role' => 'user',
-            'content' => $message->content,
+            'content' => [
+                ['type' => 'text', 'text' => $message->content],
+                ...$this->mapAttachments($message->attachments),
+            ],
         ];
     }
 

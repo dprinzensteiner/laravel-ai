@@ -187,6 +187,26 @@ describe('file operations', function (): void {
         Ai::assertFileAddedToStore(Stores::fakeId('My Store'), 'hello.txt');
     });
 
+    test('direct-upload providers do not delete a provider file when removing documents', function (): void {
+        config(['ai.providers.mistral' => [
+            ...config('ai.providers.mistral'),
+            'key' => 'test-key',
+        ]]);
+
+        Stores::fake();
+        Files::fake();
+
+        $store = Stores::create('My Store', provider: 'mistral');
+
+        $document = $store->add(Document::fromString('Hello, world!', 'text/plain')->as('hello.txt'));
+
+        expect($store->remove($document, deleteFile: true))->toBeTrue();
+
+        $store->assertRemoved('hello.txt');
+
+        Files::assertNothingDeleted();
+    });
+
     test('can add an uploaded file to store from its path', function (): void {
         Stores::fake();
 

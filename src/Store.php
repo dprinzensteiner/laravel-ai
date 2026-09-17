@@ -80,7 +80,8 @@ class Store
     {
         $removed = $this->provider->removeFileFromStore($this->id, $documentId);
 
-        if ($deleteFile && $removed) {
+        // Directly uploaded documents have no separately stored provider file to delete...
+        if ($deleteFile && $removed && ! $this->provider instanceof UploadsDocumentsToStore) {
             Files::delete(
                 $documentId instanceof HasProviderId ? $documentId->id() : $documentId,
                 provider: $this->provider->name()

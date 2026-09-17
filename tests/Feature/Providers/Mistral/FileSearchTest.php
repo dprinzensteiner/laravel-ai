@@ -3,6 +3,12 @@
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Laravel\Ai\Ai;
+use Laravel\Ai\Attributes\MaxTokens;
+use Laravel\Ai\Attributes\Temperature;
+use Laravel\Ai\Attributes\TopP;
+use Laravel\Ai\Contracts\HasTools;
+use Laravel\Ai\Exceptions\AiException;
+use Laravel\Ai\Files\Document;
 use Laravel\Ai\Files\RemoteImage;
 use Laravel\Ai\Providers\Tools\FileSearch;
 use Laravel\Ai\Streaming\Events\StreamEnd;
@@ -10,6 +16,9 @@ use Laravel\Ai\Streaming\Events\StreamStart;
 use Laravel\Ai\Streaming\Events\TextDelta;
 use Laravel\Ai\Streaming\Events\TextEnd;
 use Laravel\Ai\Streaming\Events\TextStart;
+use Tests\Fixtures\Agents\AssistantAgent;
+use Tests\Fixtures\Agents\StructuredAgent;
+use Tests\Fixtures\Agents\ToolChoiceAgent;
 use Tests\Fixtures\Tools\FixedNumberGenerator;
 
 use function Laravel\Ai\agent;
@@ -57,14 +66,37 @@ test('file search metadata filters throw an exception', function () {
         ->toThrow(InvalidArgumentException::class, 'Mistral does not support file search metadata filters.');
 });
 
-test('attachments with file search throw an exception', function () {
+test('attachments with file search map to conversation content chunks', function () {
+    Http::fake([
+        'api.mistral.ai/v1/conversations' => Http::response(fakeMistralConversationResponse()),
+    ]);
+
+    agent(tools: [new FileSearch(['lib-123'])])
+        ->prompt('Describe this', attachments: [new RemoteImage('https://example.com/image.png')], provider: 'mistral');
+
+    Http::assertSent(function (Request $request) {
+        $body = json_decode($request->body(), true);
+
+        return $body['inputs'] === [[
+            'role' => 'user',
+            'content' => [
+                ['type' => 'text', 'text' => 'Describe this'],
+                ['type' => 'image_url', 'image_url' => ['url' => 'https://example.com/image.png']],
+            ],
+        ]];
+    });
+});
+
+test('provider document attachments with file search throw an exception', function () {
     Http::fake([
         'api.mistral.ai/v1/conversations' => Http::response(fakeMistralConversationResponse()),
     ]);
 
     expect(fn () => agent(tools: [new FileSearch(['lib-123'])])
-        ->prompt('Describe this', attachments: [new RemoteImage('https://example.com/image.png')], provider: 'mistral'))
-        ->toThrow(RuntimeException::class, 'Mistral does not support attachments when using file search.');
+        ->prompt('Describe this', attachments: [Document::fromId('file-123')], provider: 'mistral'))
+        ->toThrow(RuntimeException::class, 'Mistral does not support stored provider document attachments when using file search.');
+
+    Http::assertNothingSent();
 });
 
 test('prompts with file search route to the conversations api', function () {
@@ -176,3 +208,117 @@ test('streaming with file search emits synthetic text events', function () {
         ->and($events[3])->toBeInstanceOf(TextEnd::class)
         ->and($events[4])->toBeInstanceOf(StreamEnd::class);
 });
+
+test('generation options map to conversation completion args', function () {
+    Http::fake([
+        'api.mistral.ai/v1/conversations' => Http::response(fakeMistralConversationResponse()),
+    ]);
+
+    $agent = new #[MaxTokens(4096), Temperature(0.7), TopP(0.8)] class extends AssistantAgent implements HasTools
+    {
+        public function tools(): iterable
+        {
+            return [new FileSearch(['lib-123'])];
+        }
+    };
+
+    $agent->prompt('Is Valkey mentioned?', provider: 'mistral');
+
+    Http::assertSent(function (Request $request) {
+        $body = json_decode($request->body(), true);
+
+        return $body['completion_args'] === ['temperature' => 0.7, 'top_p' => 0.8, 'max_tokens' => 4096]
+            && ! array_key_exists('temperature', $body)
+            && ! array_key_exists('max_tokens', $body);
+    });
+});
+
+test('completion args are omitted when no generation options are set', function () {
+    Http::fake([
+        'api.mistral.ai/v1/conversations' => Http::response(fakeMistralConversationResponse()),
+    ]);
+
+    agent(tools: [new FileSearch(['lib-123'])])->prompt('Is Valkey mentioned?', provider: 'mistral');
+
+    Http::assertSent(fn (Request $request) => ! array_key_exists('completion_args', json_decode($request->body(), true)));
+});
+
+test('tool choice maps to conversation completion args', function () {
+    Http::fake([
+        'api.mistral.ai/v1/conversations' => Http::response(fakeMistralConversationResponse()),
+    ]);
+
+    $agent = new class('required') extends ToolChoiceAgent
+    {
+        public function tools(): iterable
+        {
+            return [new FileSearch(['lib-123']), ...parent::tools()];
+        }
+    };
+
+    $agent->prompt('Is Valkey mentioned?', provider: 'mistral');
+
+    Http::assertSent(fn (Request $request) => data_get(json_decode($request->body(), true), 'completion_args.tool_choice') === 'required');
+});
+
+test('named tool choice with file search throws an exception', function () {
+    Http::fake([
+        'api.mistral.ai/v1/conversations' => Http::response(fakeMistralConversationResponse()),
+    ]);
+
+    $agent = new class(['tool' => 'custom_named_tool']) extends ToolChoiceAgent
+    {
+        public function tools(): iterable
+        {
+            return [new FileSearch(['lib-123']), ...parent::tools()];
+        }
+    };
+
+    expect(fn () => $agent->prompt('Is Valkey mentioned?', provider: 'mistral'))
+        ->toThrow(RuntimeException::class, 'Mistral does not support forcing a specific tool when using file search.');
+});
+
+test('structured output with file search sends a response format and decodes the result', function () {
+    Http::fake([
+        'api.mistral.ai/v1/conversations' => Http::response(fakeMistralConversationResponse('{"symbol":"Au"}')),
+    ]);
+
+    $agent = new class extends StructuredAgent implements HasTools
+    {
+        public function tools(): iterable
+        {
+            return [new FileSearch(['lib-123'])];
+        }
+    };
+
+    $response = $agent->prompt('What is the symbol for gold?', provider: 'mistral');
+
+    expect($response['symbol'])->toBe('Au');
+
+    Http::assertSent(fn (Request $request) => data_get(json_decode($request->body(), true), 'completion_args.response_format.type') === 'json_schema');
+});
+
+test('conversation usage is parsed', function () {
+    Http::fake([
+        'api.mistral.ai/v1/conversations' => Http::response(fakeMistralConversationResponse()),
+    ]);
+
+    $response = agent(tools: [new FileSearch(['lib-123'])])->prompt('Is Valkey mentioned?', provider: 'mistral');
+
+    expect($response->usage->promptTokens)->toBe(10)
+        ->and($response->usage->completionTokens)->toBe(5)
+        ->and($response->meta->provider)->toBe('mistral')
+        ->and($response->meta->model)->toBe('mistral-medium-latest');
+});
+
+test('conversation api errors are surfaced', function () {
+    Http::fake([
+        'api.mistral.ai/v1/conversations' => Http::response([
+            'object' => 'error',
+            'message' => 'Library not found.',
+            'type' => 'invalid_request_error',
+        ]),
+    ]);
+
+    agent(tools: [new FileSearch(['lib-404'])])->prompt('Is Valkey mentioned?', provider: 'mistral');
+})->throws(AiException::class, 'Library not found.');
