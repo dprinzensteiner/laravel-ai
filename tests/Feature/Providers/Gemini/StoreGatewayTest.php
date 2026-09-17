@@ -1,10 +1,12 @@
 <?php
 
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Sleep;
 use Laravel\Ai\AiManager;
+use Laravel\Ai\Exceptions\AiException;
 use Laravel\Ai\Stores;
 
-beforeEach(function () {
+beforeEach(function (): void {
     config(['ai.providers.gemini' => [
         ...config('ai.providers.gemini'),
         'key' => 'test-gemini-key',
@@ -27,7 +29,7 @@ function fakeStoreResponse(string $name = 'fileSearchStores/store123', string $d
     ];
 }
 
-test('get store sends correct request', function () {
+test('get store sends correct request', function (): void {
     Http::fake([
         'generativelanguage.googleapis.com/*' => Http::response(fakeStoreResponse()),
     ]);
@@ -41,27 +43,23 @@ test('get store sends correct request', function () {
     expect($store->fileCounts->failed)->toBe(0);
     expect($store->ready)->toBeTrue();
 
-    Http::assertSent(function ($request) {
-        return $request->method() === 'GET'
-            && str_contains($request->url(), 'v1beta/fileSearchStores/store123')
-            && $request->hasHeader('x-goog-api-key', 'test-gemini-key');
-    });
+    Http::assertSent(fn ($request): bool => $request->method() === 'GET'
+        && str_contains((string) $request->url(), 'v1beta/fileSearchStores/store123')
+        && $request->hasHeader('x-goog-api-key', 'test-gemini-key'));
 });
 
-test('get store normalizes id with prefix', function () {
+test('get store normalizes id with prefix', function (): void {
     Http::fake([
         'generativelanguage.googleapis.com/*' => Http::response(fakeStoreResponse()),
     ]);
 
     Stores::get('fileSearchStores/store123', provider: 'gemini');
 
-    Http::assertSent(function ($request) {
-        return str_contains($request->url(), 'v1beta/fileSearchStores/store123')
-            && ! str_contains($request->url(), 'fileSearchStores/fileSearchStores/');
-    });
+    Http::assertSent(fn ($request): bool => str_contains((string) $request->url(), 'v1beta/fileSearchStores/store123')
+        && ! str_contains((string) $request->url(), 'fileSearchStores/fileSearchStores/'));
 });
 
-test('create store sends correct request', function () {
+test('create store sends correct request', function (): void {
     Http::fake([
         'generativelanguage.googleapis.com/*' => Http::response(fakeStoreResponse()),
     ]);
@@ -71,20 +69,26 @@ test('create store sends correct request', function () {
     expect($store->id)->toBe('fileSearchStores/store123');
     expect($store->name)->toBe('Test Store');
 
-    Http::assertSent(function ($request) {
-        return $request->method() === 'POST'
-            && str_contains($request->url(), 'v1beta/fileSearchStores')
-            && ($request->data()['displayName'] ?? null) === 'Test Store';
-    });
+    Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+        && str_contains((string) $request->url(), 'v1beta/fileSearchStores')
+        && ($request->data()['displayName'] ?? null) === 'Test Store');
 });
 
-test('create store with file ids adds files', function () {
+test('create store with file ids adds files', function (): void {
     Http::fake([
         'generativelanguage.googleapis.com/*' => Http::sequence([
             Http::response(['name' => 'fileSearchStores/store123']),
             Http::response(fakeStoreResponse()),
-            Http::response(['name' => 'fileSearchStores/store123/documents/doc1']),
-            Http::response(['name' => 'fileSearchStores/store123/documents/doc2']),
+            Http::response([
+                'name' => 'fileSearchStores/store123/operations/import1',
+                'done' => true,
+                'response' => ['documentName' => 'fileSearchStores/store123/documents/doc1'],
+            ]),
+            Http::response([
+                'name' => 'fileSearchStores/store123/operations/import2',
+                'done' => true,
+                'response' => ['documentName' => 'fileSearchStores/store123/documents/doc2'],
+            ]),
         ]),
     ]);
 
@@ -93,10 +97,14 @@ test('create store with file ids adds files', function () {
     Http::assertSentCount(4);
 });
 
-test('add file sends correct request', function () {
+test('add file sends correct request', function (): void {
     Http::fake([
         'generativelanguage.googleapis.com/*' => Http::response([
-            'name' => 'fileSearchStores/store123/documents/doc456',
+            'name' => 'fileSearchStores/store123/operations/import456',
+            'done' => true,
+            'response' => [
+                'documentName' => 'fileSearchStores/store123/documents/doc456',
+            ],
         ]),
     ]);
 
@@ -105,17 +113,100 @@ test('add file sends correct request', function () {
 
     expect($documentId)->toBe('doc456');
 
-    Http::assertSent(function ($request) {
-        return $request->method() === 'POST'
-            && str_contains($request->url(), 'fileSearchStores/store123:importFile')
-            && ($request->data()['fileName'] ?? null) === 'files/file789';
-    });
+    Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+        && str_contains((string) $request->url(), 'fileSearchStores/store123:importFile')
+        && ($request->data()['fileName'] ?? null) === 'files/file789');
 });
 
-test('add file with metadata formats correctly', function () {
+test('add file waits for the import operation and returns the document id', function (): void {
+    Sleep::fake();
+
+    Http::fake([
+        'generativelanguage.googleapis.com/*' => Http::sequence([
+            Http::response([
+                'name' => 'fileSearchStores/store123/operations/import456',
+                'done' => false,
+            ]),
+            Http::response([
+                'name' => 'fileSearchStores/store123/operations/import456',
+                'done' => true,
+                'response' => [
+                    'documentName' => 'fileSearchStores/store123/documents/doc456',
+                ],
+            ]),
+        ]),
+    ]);
+
+    $provider = geminiProvider();
+    $documentId = $provider->storeGateway()->addFile($provider, 'store123', 'file789');
+
+    expect($documentId)->toBe('doc456');
+
+    Http::assertSentCount(2);
+    Http::assertSent(fn ($request): bool => $request->method() === 'GET'
+        && str_contains((string) $request->url(), 'fileSearchStores/store123/operations/import456'));
+    Sleep::assertSequence([Sleep::for(5)->seconds()]);
+});
+
+test('add file reports an import operation error', function (): void {
     Http::fake([
         'generativelanguage.googleapis.com/*' => Http::response([
-            'name' => 'fileSearchStores/store123/documents/doc456',
+            'name' => 'fileSearchStores/store123/operations/import456',
+            'done' => true,
+            'error' => [
+                'code' => 13,
+                'message' => 'Indexing failed.',
+            ],
+        ]),
+    ]);
+
+    $provider = geminiProvider();
+
+    expect(fn (): string => $provider->storeGateway()->addFile($provider, 'store123', 'file789'))
+        ->toThrow(AiException::class, 'Gemini Error: [13] Indexing failed.');
+});
+
+test('add file rejects a completed import without a document name', function (): void {
+    Http::fake([
+        'generativelanguage.googleapis.com/*' => Http::response([
+            'name' => 'fileSearchStores/store123/operations/import456',
+            'done' => true,
+            'response' => [],
+        ]),
+    ]);
+
+    $provider = geminiProvider();
+
+    expect(fn (): string => $provider->storeGateway()->addFile($provider, 'store123', 'file789'))
+        ->toThrow(AiException::class, 'Gemini Error: [invalid_response] File import completed without a document name.');
+});
+
+test('add file times out when the import operation never completes', function (): void {
+    Sleep::fake();
+
+    Http::fake([
+        'generativelanguage.googleapis.com/*' => Http::response([
+            'name' => 'fileSearchStores/store123/operations/import456',
+            'done' => false,
+        ]),
+    ]);
+
+    $provider = geminiProvider();
+
+    expect(fn (): string => $provider->storeGateway()->addFile($provider, 'store123', 'file789'))
+        ->toThrow(AiException::class, 'Gemini Error: [timeout] File import operation did not complete.');
+
+    Http::assertSentCount(61);
+});
+
+test('add file with metadata formats correctly', function (): void {
+    Http::fake([
+        'generativelanguage.googleapis.com/*' => Http::response([
+            'name' => 'fileSearchStores/store123/operations/import456',
+            'done' => true,
+            'response' => [
+                'documentName' => 'fileSearchStores/store123/documents/doc456',
+            ],
         ]),
     ]);
 
@@ -126,7 +217,7 @@ test('add file with metadata formats correctly', function () {
         'tags' => ['php', 'framework'],
     ]);
 
-    Http::assertSent(function ($request) {
+    Http::assertSent(function ($request): bool {
         $metadata = $request->data()['customMetadata'] ?? [];
 
         $string = collect($metadata)->firstWhere('key', 'company');
@@ -139,7 +230,7 @@ test('add file with metadata formats correctly', function () {
     });
 });
 
-test('remove file sends correct request', function () {
+test('remove file sends correct request', function (): void {
     Http::fake([
         'generativelanguage.googleapis.com/*' => Http::response([], 200),
     ]);
@@ -149,13 +240,11 @@ test('remove file sends correct request', function () {
 
     expect($result)->toBeTrue();
 
-    Http::assertSent(function ($request) {
-        return $request->method() === 'DELETE'
-            && str_contains($request->url(), 'fileSearchStores/store123/documents/doc456');
-    });
+    Http::assertSent(fn ($request): bool => $request->method() === 'DELETE'
+        && str_contains((string) $request->url(), 'fileSearchStores/store123/documents/doc456'));
 });
 
-test('remove file normalizes document id with files prefix', function () {
+test('remove file normalizes document id with files prefix', function (): void {
     Http::fake([
         'generativelanguage.googleapis.com/*' => Http::response([], 200),
     ]);
@@ -163,12 +252,10 @@ test('remove file normalizes document id with files prefix', function () {
     $provider = geminiProvider();
     $provider->storeGateway()->removeFile($provider, 'store123', 'files/doc456');
 
-    Http::assertSent(function ($request) {
-        return str_contains($request->url(), 'fileSearchStores/store123/documents/doc456');
-    });
+    Http::assertSent(fn ($request): bool => str_contains((string) $request->url(), 'fileSearchStores/store123/documents/doc456'));
 });
 
-test('remove file normalizes document id with documents prefix', function () {
+test('remove file normalizes document id with documents prefix', function (): void {
     Http::fake([
         'generativelanguage.googleapis.com/*' => Http::response([], 200),
     ]);
@@ -176,12 +263,10 @@ test('remove file normalizes document id with documents prefix', function () {
     $provider = geminiProvider();
     $provider->storeGateway()->removeFile($provider, 'store123', 'documents/doc456');
 
-    Http::assertSent(function ($request) {
-        return str_contains($request->url(), 'fileSearchStores/store123/documents/doc456');
-    });
+    Http::assertSent(fn ($request): bool => str_contains((string) $request->url(), 'fileSearchStores/store123/documents/doc456'));
 });
 
-test('remove file accepts full document path', function () {
+test('remove file accepts full document path', function (): void {
     Http::fake([
         'generativelanguage.googleapis.com/*' => Http::response([], 200),
     ]);
@@ -189,13 +274,11 @@ test('remove file accepts full document path', function () {
     $provider = geminiProvider();
     $provider->storeGateway()->removeFile($provider, 'store123', 'fileSearchStores/store123/documents/doc456');
 
-    Http::assertSent(function ($request) {
-        return str_contains($request->url(), 'fileSearchStores/store123/documents/doc456')
-            && ! str_contains($request->url(), 'fileSearchStores/store123/documents/fileSearchStores/');
-    });
+    Http::assertSent(fn ($request): bool => str_contains((string) $request->url(), 'fileSearchStores/store123/documents/doc456')
+        && ! str_contains((string) $request->url(), 'fileSearchStores/store123/documents/fileSearchStores/'));
 });
 
-test('delete store sends correct request', function () {
+test('delete store sends correct request', function (): void {
     Http::fake([
         'generativelanguage.googleapis.com/*' => Http::response([], 200),
     ]);
@@ -204,14 +287,12 @@ test('delete store sends correct request', function () {
 
     expect($result)->toBeTrue();
 
-    Http::assertSent(function ($request) {
-        return $request->method() === 'DELETE'
-            && str_contains($request->url(), 'v1beta/fileSearchStores/store123')
-            && $request->hasHeader('x-goog-api-key', 'test-gemini-key');
-    });
+    Http::assertSent(fn ($request): bool => $request->method() === 'DELETE'
+        && str_contains((string) $request->url(), 'v1beta/fileSearchStores/store123')
+        && $request->hasHeader('x-goog-api-key', 'test-gemini-key'));
 });
 
-test('store gateway uses custom base url', function () {
+test('store gateway uses custom base url', function (): void {
     config(['ai.providers.gemini' => [
         ...config('ai.providers.gemini'),
         'key' => 'test-gemini-key',
@@ -224,7 +305,5 @@ test('store gateway uses custom base url', function () {
 
     Stores::get('store123', provider: 'gemini');
 
-    Http::assertSent(function ($request) {
-        return str_contains($request->url(), 'custom.api.example.com/v1beta/fileSearchStores/store123');
-    });
+    Http::assertSent(fn ($request): bool => str_contains((string) $request->url(), 'custom.api.example.com/v1beta/fileSearchStores/store123'));
 });

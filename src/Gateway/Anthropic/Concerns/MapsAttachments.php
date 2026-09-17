@@ -26,7 +26,7 @@ trait MapsAttachments
      */
     protected function mapAttachments(Collection $attachments): array
     {
-        return $attachments->map(function (File|UploadedFile $attachment) {
+        return $attachments->map(function (File|UploadedFile $attachment): array {
             $mapped = match (true) {
                 $attachment instanceof ProviderImage => [
                     'type' => 'image',
@@ -64,7 +64,7 @@ trait MapsAttachments
                         'type' => 'base64',
                         'media_type' => $attachment->mimeType(),
                         'data' => base64_encode(
-                            Storage::disk($attachment->disk)->get($attachment->path)
+                            (string) Storage::disk($attachment->disk)->get($attachment->path)
                         ),
                     ],
                 ],
@@ -79,31 +79,28 @@ trait MapsAttachments
                     'type' => 'document',
                     'source' => $this->documentSource(
                         $attachment->mime,
-                        fn () => base64_decode($attachment->base64),
-                        fn () => $attachment->base64,
+                        fn (): string => base64_decode($attachment->base64),
+                        fn (): string => $attachment->base64,
                     ),
                 ],
                 $attachment instanceof LocalDocument => [
                     'type' => 'document',
                     'source' => $this->documentSource(
                         $attachment->mimeType(),
-                        fn () => file_get_contents($attachment->path),
-                        fn () => base64_encode(file_get_contents($attachment->path)),
+                        fn (): string|false => file_get_contents($attachment->path),
+                        fn (): string => base64_encode(file_get_contents($attachment->path)),
                     ),
                 ],
                 $attachment instanceof RemoteDocument => [
                     'type' => 'document',
-                    'source' => [
-                        'type' => 'url',
-                        'url' => $attachment->url,
-                    ],
+                    'source' => $this->remoteDocumentSource($attachment),
                 ],
                 $attachment instanceof StoredDocument => [
                     'type' => 'document',
                     'source' => $this->documentSource(
                         $attachment->mimeType(),
                         fn () => Storage::disk($attachment->disk)->get($attachment->path),
-                        fn () => base64_encode(Storage::disk($attachment->disk)->get($attachment->path)),
+                        fn (): string => base64_encode((string) Storage::disk($attachment->disk)->get($attachment->path)),
                     ),
                 ],
                 $attachment instanceof UploadedFile && $this->isImage($attachment) => [
@@ -119,14 +116,14 @@ trait MapsAttachments
                     'source' => $this->documentSource(
                         $attachment->getClientMimeType(),
                         fn () => $attachment->get(),
-                        fn () => base64_encode($attachment->get()),
+                        fn (): string => base64_encode($attachment->get()),
                     ),
                 ],
-                default => throw new InvalidArgumentException('Unsupported attachment type ['.get_class($attachment).']'),
+                default => throw new InvalidArgumentException('Unsupported attachment type ['.$attachment::class.']'),
             };
 
-            if (($mapped['type'] ?? '') === 'document' && $attachment instanceof File && filled($attachment->name)) {
-                $mapped['title'] = $attachment->name;
+            if (($mapped['type'] ?? '') === 'document' && $attachment instanceof File && filled($attachment->name())) {
+                $mapped['title'] = $attachment->name();
             }
 
             return $mapped;
@@ -142,19 +139,69 @@ trait MapsAttachments
      */
     protected function documentSource(?string $mimeType, callable $rawResolver, callable $base64Resolver): array
     {
-        if ($mimeType !== null && Str::startsWith($mimeType, 'text/')) {
+        if ($this->normalizeMimeType($mimeType) === 'application/pdf') {
             return [
-                'type' => 'text',
-                'media_type' => $mimeType,
-                'data' => $rawResolver(),
+                'type' => 'base64',
+                'media_type' => 'application/pdf',
+                'data' => $base64Resolver(),
             ];
         }
 
+        $raw = (string) $rawResolver();
+
+        if (str_starts_with($raw, '%PDF-')) {
+            return [
+                'type' => 'base64',
+                'media_type' => 'application/pdf',
+                'data' => base64_encode($raw),
+            ];
+        }
+
+        if (! mb_check_encoding($raw, 'UTF-8') || str_contains($raw, "\0")) {
+            throw new InvalidArgumentException('Anthropic only accepts PDF or plain text documents; ['.($mimeType ?? 'unknown').'] must be converted first.');
+        }
+
         return [
-            'type' => 'base64',
-            'media_type' => $mimeType,
-            'data' => $base64Resolver(),
+            'type' => 'text',
+            'media_type' => 'text/plain',
+            'data' => $raw,
         ];
+    }
+
+    /**
+     * Build the Anthropic document `source` block for the given remote document.
+     *
+     * @return array<string, string>
+     */
+    protected function remoteDocumentSource(RemoteDocument $document): array
+    {
+        $mimeType = $this->normalizeMimeType($document->declaredMimeType());
+
+        // A `url` source is PDF-only, so anything else has to be fetched and inlined.
+        $isPdf = $mimeType === null
+            ? in_array(strtolower(pathinfo((string) parse_url($document->url, PHP_URL_PATH), PATHINFO_EXTENSION)), ['', 'pdf'], true)
+            : $mimeType === 'application/pdf';
+
+        if ($isPdf) {
+            return [
+                'type' => 'url',
+                'url' => $document->url,
+            ];
+        }
+
+        return $this->documentSource(
+            $document->mimeType(),
+            fn (): string => $document->content(),
+            fn (): string => base64_encode($document->content()),
+        );
+    }
+
+    /**
+     * Strip any parameters from the given mime type.
+     */
+    protected function normalizeMimeType(?string $mimeType): ?string
+    {
+        return blank($mimeType) ? null : strtolower(trim(Str::before($mimeType, ';')));
     }
 
     /**
@@ -167,6 +214,7 @@ trait MapsAttachments
             'image/png',
             'image/gif',
             'image/webp',
-        ]);
+        ],
+            true);
     }
 }

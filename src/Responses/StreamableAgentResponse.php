@@ -7,8 +7,10 @@ use Illuminate\Contracts\Support\Responsable;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use IteratorAggregate;
+use Laravel\Ai\Responses\Data\Citation as CitationData;
 use Laravel\Ai\Responses\Data\Meta;
 use Laravel\Ai\Responses\Data\Usage;
+use Laravel\Ai\Streaming\Events\Citation;
 use Laravel\Ai\Streaming\Events\StreamEnd;
 use Laravel\Ai\Streaming\Events\StreamEvent;
 use Laravel\Ai\Streaming\Events\TextDelta;
@@ -19,12 +21,15 @@ class StreamableAgentResponse implements IteratorAggregate, Responsable
 {
     use Concerns\CanStreamUsingVercelProtocol;
 
-    public ?string $text;
+    public ?string $text = null;
 
-    public ?Usage $usage;
+    public ?Usage $usage = null;
 
     /** @var Collection<int, StreamEvent> */
     public Collection $events;
+
+    /** @var Collection<int, CitationData> */
+    public Collection $citations;
 
     public ?string $conversationId = null;
 
@@ -34,14 +39,22 @@ class StreamableAgentResponse implements IteratorAggregate, Responsable
 
     protected bool $usesVercelProtocol = false;
 
+    protected ?string $vercelProtocolMessageId = null;
+
     protected ?StreamedAgentResponse $streamedResponse = null;
 
+    protected bool $hasYielded = false;
+
+    /**
+     * Create a new streamable agent response instance.
+     */
     public function __construct(
         public string $invocationId,
         protected Closure $generator,
         protected ?Meta $meta = null,
     ) {
         $this->events = new Collection;
+        $this->citations = new Collection;
     }
 
     /**
@@ -64,7 +77,7 @@ class StreamableAgentResponse implements IteratorAggregate, Responsable
     public function then(callable $callback): self
     {
         // If the response has already been iterated / streamed, invoke now...
-        if ($this->streamedResponse) {
+        if ($this->streamedResponse instanceof StreamedAgentResponse) {
             $callback($this->streamedResponse);
 
             $this->syncConversationFromStreamedResponse();
@@ -93,7 +106,7 @@ class StreamableAgentResponse implements IteratorAggregate, Responsable
      */
     public function adoptStateFrom(StreamedAgentResponse $response): self
     {
-        if ($this->meta !== null) {
+        if ($this->meta instanceof Meta) {
             $this->meta->provider = $response->meta->provider;
             $this->meta->model = $response->meta->model;
             $this->meta->citations = $response->meta->citations;
@@ -111,9 +124,10 @@ class StreamableAgentResponse implements IteratorAggregate, Responsable
      *
      * See: https://ai-sdk.dev/docs/ai-sdk-ui/stream-protocol
      */
-    public function usingVercelDataProtocol(bool $value = true): self
+    public function usingVercelDataProtocol(bool $value = true, ?string $messageId = null): self
     {
         $this->usesVercelProtocol = $value;
+        $this->vercelProtocolMessageId = $messageId;
 
         return $this;
     }
@@ -131,7 +145,7 @@ class StreamableAgentResponse implements IteratorAggregate, Responsable
 
         return response()->stream(function () {
             foreach ($this as $event) {
-                yield 'data: '.((string) $event)."\n\n";
+                yield 'data: '.($event)."\n\n";
             }
 
             yield "data: [DONE]\n\n";
@@ -146,6 +160,8 @@ class StreamableAgentResponse implements IteratorAggregate, Responsable
         // Use existing events if we've already streamed them once...
         if (count($this->events) > 0) {
             foreach ($this->events as $event) {
+                $this->hasYielded = true;
+
                 yield $event;
             }
 
@@ -158,11 +174,14 @@ class StreamableAgentResponse implements IteratorAggregate, Responsable
         foreach (call_user_func($this->generator) as $event) {
             $events[] = $event;
 
+            $this->hasYielded = true;
+
             yield $event;
         }
 
         $this->events = new Collection($events);
         $this->text = TextDelta::combine($events);
+        $this->citations = Citation::combine($events);
         $this->usage = StreamEnd::combineUsage($events);
 
         $this->streamedResponse = new StreamedAgentResponse(
@@ -185,6 +204,9 @@ class StreamableAgentResponse implements IteratorAggregate, Responsable
         $this->syncConversationFromStreamedResponse();
     }
 
+    /**
+     * Synchronize the conversation state from the completed streamed response.
+     */
     protected function syncConversationFromStreamedResponse(): void
     {
         if ($this->streamedResponse->conversationId === null) {
@@ -193,5 +215,13 @@ class StreamableAgentResponse implements IteratorAggregate, Responsable
 
         $this->conversationId = $this->streamedResponse->conversationId;
         $this->conversationUser = $this->streamedResponse->conversationUser;
+    }
+
+    /**
+     * Determine whether this response has handed at least one event to a consumer.
+     */
+    public function hasYielded(): bool
+    {
+        return $this->hasYielded;
     }
 }

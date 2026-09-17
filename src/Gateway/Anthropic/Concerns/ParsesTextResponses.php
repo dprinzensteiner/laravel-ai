@@ -66,7 +66,7 @@ trait ParsesTextResponses
         $toolCalls = $this->extractToolCalls($content);
         $citations = $this->extractCitations($content);
 
-        $realToolCalls = array_values(array_filter($toolCalls, fn (ToolCall $tc) => $tc->name !== 'output_structured_data'));
+        $realToolCalls = array_values(array_filter($toolCalls, fn (ToolCall $tc): bool => $tc->name !== 'output_structured_data'));
         $hasStructuredToolCall = count($realToolCalls) < count($toolCalls);
 
         $structuredData = null;
@@ -80,7 +80,7 @@ trait ParsesTextResponses
         }
 
         // If the only tool call was the synthetic structured output, this is really a stop.
-        if ($finishReason === FinishReason::ToolCalls && empty($realToolCalls)) {
+        if ($finishReason === FinishReason::ToolCalls && $realToolCalls === []) {
             $finishReason = FinishReason::Stop;
         }
 
@@ -100,7 +100,7 @@ trait ParsesTextResponses
      */
     protected function extractText(array $content): string
     {
-        $textBlocks = array_filter($content, fn (array $block) => ($block['type'] ?? '') === 'text');
+        $textBlocks = array_filter($content, fn (array $block): bool => ($block['type'] ?? '') === 'text');
 
         return implode('', array_column($textBlocks, 'text'));
     }
@@ -112,9 +112,9 @@ trait ParsesTextResponses
      */
     protected function extractToolCalls(array $content): array
     {
-        $toolUseBlocks = array_filter($content, fn (array $block) => ($block['type'] ?? '') === 'tool_use');
+        $toolUseBlocks = array_filter($content, fn (array $block): bool => ($block['type'] ?? '') === 'tool_use');
 
-        return array_values(array_map(fn (array $block) => new ToolCall(
+        return array_values(array_map(fn (array $block): ToolCall => new ToolCall(
             $block['id'] ?? '',
             $block['name'] ?? '',
             $block['input'] ?? [],
@@ -137,6 +137,17 @@ trait ParsesTextResponses
                     $citations->push(new UrlCitation(
                         $result['url'] ?? '',
                         $result['title'] ?? null,
+                    ));
+                }
+            }
+
+            if ($blockType === 'web_fetch_tool_result') {
+                $result = $block['content'] ?? [];
+
+                if (($result['type'] ?? '') === 'web_fetch_result' && filled($result['url'] ?? null)) {
+                    $citations->push(new UrlCitation(
+                        $result['url'],
+                        $result['content']['title'] ?? null,
                     ));
                 }
             }
@@ -180,7 +191,8 @@ trait ParsesTextResponses
             'end_turn', 'stop_sequence' => FinishReason::Stop,
             'tool_use' => FinishReason::ToolCalls,
             'pause_turn' => FinishReason::Continue,
-            'max_tokens' => FinishReason::Length,
+            'max_tokens', 'model_context_window_exceeded' => FinishReason::Length,
+            'refusal' => FinishReason::ContentFilter,
             default => FinishReason::Unknown,
         };
     }

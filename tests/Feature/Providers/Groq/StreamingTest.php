@@ -1,6 +1,7 @@
 <?php
 
 use Illuminate\Support\Facades\Http;
+use Laravel\Ai\Exceptions\StreamErrorException;
 use Laravel\Ai\Responses\Data\FinishReason;
 use Laravel\Ai\Streaming\Events\Error;
 use Laravel\Ai\Streaming\Events\StreamEnd;
@@ -11,14 +12,14 @@ use Laravel\Ai\Streaming\Events\TextStart;
 use Laravel\Ai\Streaming\Events\ToolCall as ToolCallEvent;
 use Tests\Fixtures\Agents\ProviderOptionsWithToolsAgent;
 
-beforeEach(function () {
+beforeEach(function (): void {
     config(['ai.providers.groq' => [
         ...config('ai.providers.groq'),
         'key' => 'test-key',
     ]]);
 });
 
-test('streaming emits text events', function () {
+test('streaming emits text events', function (): void {
     Http::fake([
         'api.groq.com/*' => Http::response(
             body: $this->ssePayload([
@@ -42,7 +43,7 @@ test('streaming emits text events', function () {
         ->and($events[count($events) - 1])->toBeInstanceOf(StreamEnd::class);
 });
 
-test('streaming handles tool calls', function () {
+test('streaming handles tool calls', function (): void {
     Http::fake([
         'api.groq.com/*' => Http::sequence([
             Http::response(
@@ -69,14 +70,14 @@ test('streaming handles tool calls', function () {
 
     $events = $this->collectStreamEvents(agent: new ProviderOptionsWithToolsAgent);
 
-    $toolCallEvents = array_values(array_filter($events, fn ($e) => $e instanceof ToolCallEvent));
+    $toolCallEvents = array_values(array_filter($events, fn ($e): bool => $e instanceof ToolCallEvent));
 
     expect($toolCallEvents)->not->toBeEmpty()
         ->and($toolCallEvents[0]->toolCall->name)->toBe('FixedNumberGenerator')
         ->and($toolCallEvents[0]->toolCall->id)->toBe('call_1');
 });
 
-test('streaming tool call loop emits a single accumulated stream end', function () {
+test('streaming tool call loop emits a single accumulated stream end', function (): void {
     Http::fake([
         'api.groq.com/*' => Http::sequence([
             Http::response(
@@ -103,7 +104,7 @@ test('streaming tool call loop emits a single accumulated stream end', function 
 
     $events = $this->collectStreamEvents(agent: new ProviderOptionsWithToolsAgent);
 
-    $streamEnds = array_values(array_filter($events, fn ($e) => $e instanceof StreamEnd));
+    $streamEnds = array_values(array_filter($events, fn ($e): bool => $e instanceof StreamEnd));
 
     expect($streamEnds)->toHaveCount(1)
         ->and($streamEnds[0]->reason)->toBe(FinishReason::Stop->value)
@@ -111,7 +112,7 @@ test('streaming tool call loop emits a single accumulated stream end', function 
         ->and($streamEnds[0]->usage->completionTokens)->toBe(15);
 });
 
-test('streaming error event stops stream', function () {
+test('streaming error event stops stream', function (): void {
     Http::fake([
         'api.groq.com/*' => Http::response(
             body: $this->ssePayload([
@@ -122,15 +123,20 @@ test('streaming error event stops stream', function () {
         ),
     ]);
 
-    $events = $this->collectStreamEvents();
+    $error = null;
 
-    expect($events)->toHaveCount(1)
-        ->and($events[0])->toBeInstanceOf(Error::class)
-        ->and($events[0]->type)->toBe('rate_limit_exceeded')
-        ->and($events[0]->message)->toBe('Rate limit exceeded');
+    try {
+        $this->collectStreamEvents();
+    } catch (StreamErrorException $exception) {
+        $error = $exception->error;
+    }
+
+    expect($error)->toBeInstanceOf(Error::class)
+        ->and($error->type)->toBe('rate_limit_exceeded')
+        ->and($error->message)->toBe('Rate limit exceeded');
 });
 
-test('streaming captures usage from final chunk', function () {
+test('streaming captures usage from final chunk', function (): void {
     Http::fake([
         'api.groq.com/*' => Http::response(
             body: $this->ssePayload([
@@ -145,13 +151,13 @@ test('streaming captures usage from final chunk', function () {
 
     $events = $this->collectStreamEvents();
 
-    $streamEnd = array_values(array_filter($events, fn ($e) => $e instanceof StreamEnd))[0];
+    $streamEnd = array_values(array_filter($events, fn ($e): bool => $e instanceof StreamEnd))[0];
 
     expect($streamEnd->usage->promptTokens)->toBe(42)
         ->and($streamEnd->usage->completionTokens)->toBe(10);
 });
 
-test('streaming captures reasoning tokens', function () {
+test('streaming captures reasoning tokens', function (): void {
     Http::fake([
         'api.groq.com/*' => Http::response(
             body: $this->ssePayload([
@@ -173,14 +179,14 @@ test('streaming captures reasoning tokens', function () {
 
     $events = $this->collectStreamEvents();
 
-    $streamEnd = array_values(array_filter($events, fn ($e) => $e instanceof StreamEnd))[0];
+    $streamEnd = array_values(array_filter($events, fn ($e): bool => $e instanceof StreamEnd))[0];
 
     expect($streamEnd->usage->promptTokens)->toBe(100)
         ->and($streamEnd->usage->completionTokens)->toBe(50)
         ->and($streamEnd->usage->reasoningTokens)->toBe(20);
 });
 
-test('streaming finish reason maps correctly', function (string $apiReason, $expected) {
+test('streaming finish reason maps correctly', function (string $apiReason, $expected): void {
     Http::fake([
         'api.groq.com/*' => Http::response(
             body: $this->ssePayload([
@@ -195,7 +201,7 @@ test('streaming finish reason maps correctly', function (string $apiReason, $exp
 
     $events = $this->collectStreamEvents();
 
-    $streamEnd = array_values(array_filter($events, fn ($e) => $e instanceof StreamEnd))[0];
+    $streamEnd = array_values(array_filter($events, fn ($e): bool => $e instanceof StreamEnd))[0];
 
     expect($streamEnd->reason)->toBe($expected->value);
 })->with([

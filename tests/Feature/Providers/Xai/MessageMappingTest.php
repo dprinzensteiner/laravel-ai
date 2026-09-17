@@ -2,6 +2,7 @@
 
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Laravel\Ai\Files\Base64Document;
 use Laravel\Ai\Files\Base64Image;
 use Laravel\Ai\Files\LocalImage;
 use Laravel\Ai\Files\RemoteDocument;
@@ -16,30 +17,30 @@ use Tests\Fixtures\Agents\ToolUsingAgent;
 
 use function Laravel\Ai\agent;
 
-beforeEach(function () {
+beforeEach(function (): void {
     config(['ai.providers.xai' => [
         ...config('ai.providers.xai'),
         'key' => 'test-key',
     ]]);
 });
 
-test('user message maps to responses api format', function () {
+test('user message maps to responses api format', function (): void {
     Http::fake(['*' => $this->fakeTextResponse()]);
 
     (new AssistantAgent)->prompt('What is Laravel?', provider: 'xai');
 
-    Http::assertSent(function (Request $request) {
+    Http::assertSent(function (Request $request): bool {
         $body = json_decode($request->body(), true);
         $userMsg = collect($body['input'])->firstWhere('role', 'user');
 
         return $userMsg !== null
             && collect($userMsg['content'])->contains(
-                fn ($c) => ($c['type'] ?? '') === 'input_text' && $c['text'] === 'What is Laravel?'
+                fn ($c): bool => ($c['type'] ?? '') === 'input_text' && $c['text'] === 'What is Laravel?'
             );
     });
 });
 
-test('tool call follow up uses previous response id', function () {
+test('tool call follow up uses previous response id', function (): void {
     Http::fake([
         '*' => Http::sequence([
             $this->fakeToolCallResponse(),
@@ -53,19 +54,19 @@ test('tool call follow up uses previous response id', function () {
 
     expect($recorded)->toHaveCount(2);
 
-    $followUpBody = json_decode($recorded[1][0]->body(), true);
+    $followUpBody = json_decode((string) $recorded[1][0]->body(), true);
 
     expect($followUpBody)->toHaveKey('previous_response_id')
         ->and($followUpBody['previous_response_id'])->not->toBeEmpty();
 
     $hasToolOutput = collect($followUpBody['input'])->contains(
-        fn ($item) => ($item['type'] ?? '') === 'function_call_output'
+        fn ($item): bool => ($item['type'] ?? '') === 'function_call_output'
     );
 
     expect($hasToolOutput)->toBeTrue('Follow-up should include function_call_output');
 });
 
-test('remote image attachment maps to input image', function () {
+test('remote image attachment maps to input image', function (): void {
     Http::fake(['*' => $this->fakeTextResponse('I see an image')]);
 
     $image = new RemoteImage('https://example.com/image.png');
@@ -76,7 +77,7 @@ test('remote image attachment maps to input image', function () {
         provider: 'xai',
     );
 
-    Http::assertSent(function (Request $request) {
+    Http::assertSent(function (Request $request): bool {
         $body = json_decode($request->body(), true);
         $userMsg = collect($body['input'])->firstWhere('role', 'user');
 
@@ -87,7 +88,7 @@ test('remote image attachment maps to input image', function () {
     });
 });
 
-test('base64 image attachment maps to data uri', function () {
+test('base64 image attachment maps to data uri', function (): void {
     Http::fake(['*' => $this->fakeTextResponse('I see an image')]);
 
     $image = new Base64Image(base64_encode('fake-image-data'), 'image/png');
@@ -98,18 +99,18 @@ test('base64 image attachment maps to data uri', function () {
         provider: 'xai',
     );
 
-    Http::assertSent(function (Request $request) {
+    Http::assertSent(function (Request $request): bool {
         $body = json_decode($request->body(), true);
         $userMsg = collect($body['input'])->firstWhere('role', 'user');
 
         $imageBlock = collect($userMsg['content'])->firstWhere('type', 'input_image');
 
         return $imageBlock !== null
-            && str_starts_with($imageBlock['image_url'], 'data:image/png;base64,');
+            && str_starts_with((string) $imageBlock['image_url'], 'data:image/png;base64,');
     });
 });
 
-test('local image attachment without explicit mime type detects mime from file', function () {
+test('local image attachment without explicit mime type detects mime from file', function (): void {
     Http::fake(['*' => $this->fakeTextResponse('I see an image')]);
 
     agent('You are helpful.')->prompt(
@@ -118,18 +119,18 @@ test('local image attachment without explicit mime type detects mime from file',
         provider: 'xai',
     );
 
-    Http::assertSent(function (Request $request) {
+    Http::assertSent(function (Request $request): bool {
         $body = json_decode($request->body(), true);
         $userMsg = collect($body['input'])->firstWhere('role', 'user');
         $imageBlock = collect($userMsg['content'])->firstWhere('type', 'input_image');
 
         return $imageBlock !== null
-            && str_starts_with($imageBlock['image_url'], 'data:image/png;base64,')
-            && ! str_contains($imageBlock['image_url'], 'data:;base64,');
+            && str_starts_with((string) $imageBlock['image_url'], 'data:image/png;base64,')
+            && ! str_contains((string) $imageBlock['image_url'], 'data:;base64,');
     });
 });
 
-test('remote document maps to input file', function () {
+test('remote document maps to input file', function (): void {
     Http::fake(['*' => $this->fakeTextResponse('I see a document')]);
 
     $document = new RemoteDocument('https://example.com/report.pdf');
@@ -140,7 +141,7 @@ test('remote document maps to input file', function () {
         provider: 'xai',
     );
 
-    Http::assertSent(function (Request $request) {
+    Http::assertSent(function (Request $request): bool {
         $body = json_decode($request->body(), true);
         $userMsg = collect($body['input'])->firstWhere('role', 'user');
 
@@ -151,12 +152,33 @@ test('remote document maps to input file', function () {
     });
 });
 
-test('reasoning blocks are interleaved with associated tool calls on assistant replay', function () {
+test('base64 document without an explicit name falls back to a mime-based filename', function (): void {
+    Http::fake(['*' => $this->fakeTextResponse('I see a document')]);
+
+    $document = new Base64Document(base64_encode('fake-pdf-data'), 'application/pdf');
+
+    agent('You are helpful.')->prompt(
+        'What is in this document?',
+        attachments: [$document],
+        provider: 'xai',
+    );
+
+    Http::assertSent(function (Request $request): bool {
+        $body = json_decode($request->body(), true);
+        $userMsg = collect($body['input'])->firstWhere('role', 'user');
+
+        $fileBlock = collect($userMsg['content'])->firstWhere('type', 'input_file');
+
+        return $fileBlock !== null
+            && $fileBlock['filename'] === 'document.pdf';
+    });
+});
+
+test('reasoning blocks are interleaved with associated tool calls on assistant replay', function (): void {
     Http::fake(['*' => $this->fakeTextResponse('hi')]);
 
     agent(
         instructions: 'Hi.',
-        tools: [(new ToolUsingAgent(fixed: true))->tools()[0]],
         messages: [
             new UserMessage('search'),
             new AssistantMessage('Searching.', collect([
@@ -194,17 +216,18 @@ test('reasoning blocks are interleaved with associated tool calls on assistant r
             ])),
             new UserMessage('thanks'),
         ],
+        tools: [(new ToolUsingAgent(fixed: true))->tools()[0]],
     )->prompt('', provider: 'xai');
 
-    Http::assertSent(function (Request $request) {
+    Http::assertSent(function (Request $request): bool {
         $body = json_decode($request->body(), true);
         $input = $body['input'];
 
-        $rs1Index = collect($input)->search(fn ($i) => ($i['type'] ?? '') === 'reasoning' && ($i['id'] ?? '') === 'rs_1');
-        $call1Index = collect($input)->search(fn ($i) => ($i['id'] ?? '') === 'call_1');
-        $rs2Index = collect($input)->search(fn ($i) => ($i['type'] ?? '') === 'reasoning' && ($i['id'] ?? '') === 'rs_2');
-        $call2Index = collect($input)->search(fn ($i) => ($i['id'] ?? '') === 'call_2');
-        $call3Index = collect($input)->search(fn ($i) => ($i['id'] ?? '') === 'call_3');
+        $rs1Index = collect($input)->search(fn ($i): bool => ($i['type'] ?? '') === 'reasoning' && ($i['id'] ?? '') === 'rs_1');
+        $call1Index = collect($input)->search(fn ($i): bool => ($i['id'] ?? '') === 'call_1');
+        $rs2Index = collect($input)->search(fn ($i): bool => ($i['type'] ?? '') === 'reasoning' && ($i['id'] ?? '') === 'rs_2');
+        $call2Index = collect($input)->search(fn ($i): bool => ($i['id'] ?? '') === 'call_2');
+        $call3Index = collect($input)->search(fn ($i): bool => ($i['id'] ?? '') === 'call_3');
 
         return $rs1Index !== false
             && $call1Index !== false
@@ -216,17 +239,17 @@ test('reasoning blocks are interleaved with associated tool calls on assistant r
     });
 });
 
-test('system instructions are in input array', function () {
+test('system instructions are in input array', function (): void {
     Http::fake(['*' => $this->fakeTextResponse()]);
 
     (new AssistantAgent)->prompt('Hi', provider: 'xai');
 
-    Http::assertSent(function (Request $request) {
+    Http::assertSent(function (Request $request): bool {
         $body = json_decode($request->body(), true);
 
         $systemMsg = collect($body['input'])->firstWhere('role', 'system');
 
         return $systemMsg !== null
-            && str_contains($systemMsg['content'], 'helpful assistant');
+            && str_contains((string) $systemMsg['content'], 'helpful assistant');
     });
 });

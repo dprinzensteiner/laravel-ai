@@ -1,21 +1,24 @@
 <?php
 
 use Illuminate\Container\Container;
+use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\JsonSchema\JsonSchemaTypeFactory;
 use Laravel\Ai\ObjectSchema;
 use Laravel\Ai\Tools\McpServerTool;
 use Laravel\Ai\Tools\Request;
+use Laravel\Mcp\Response;
+use Laravel\Mcp\Server\Tool;
 use Tests\Fixtures\Mcp\FakeArrayMcpServerTool;
 use Tests\Fixtures\Mcp\FakeErroringMcpServerTool;
 use Tests\Fixtures\Mcp\FakeMcpServerTool;
 use Tests\Fixtures\Mcp\FakeStreamingMcpServerTool;
 use Tests\Fixtures\Mcp\FakeStructuredMcpServerTool;
 
-beforeEach(function () {
+beforeEach(function (): void {
     Container::setInstance(new Container);
 });
 
-test('it detects mcp server tool primitives', function () {
+test('it detects mcp server tool primitives', function (): void {
     expect([
         McpServerTool::supports(new FakeMcpServerTool),
         McpServerTool::supports(new stdClass),
@@ -25,7 +28,7 @@ test('it detects mcp server tool primitives', function () {
     );
 });
 
-test('it exposes the tool name, description, and schema', function () {
+test('it exposes the tool name, description, and schema', function (): void {
     $tool = new McpServerTool(new FakeMcpServerTool);
 
     expect($tool->name())->toBe('fake-mcp-server-tool');
@@ -49,7 +52,7 @@ test('it exposes the tool name, description, and schema', function () {
     ]);
 });
 
-test('it invokes the underlying tool and returns text content', function () {
+test('it invokes the underlying tool and returns text content', function (): void {
     $serverTool = new FakeMcpServerTool;
     $tool = new McpServerTool($serverTool);
 
@@ -59,7 +62,7 @@ test('it invokes the underlying tool and returns text content', function () {
     expect($serverTool->invocations)->toBe([['city' => 'Paris']]);
 });
 
-test('it serializes structured tool responses as json', function () {
+test('it serializes structured tool responses as json', function (): void {
     $tool = new McpServerTool(new FakeStructuredMcpServerTool);
 
     $result = $tool->handle(new Request(['city' => 'Paris']));
@@ -73,28 +76,53 @@ test('it serializes structured tool responses as json', function () {
         ]);
 });
 
-test('it surfaces tool errors with the standard prefix', function () {
+test('it does not escape slashes in structured content json', function (): void {
+    $tool = new McpServerTool(new FakeStructuredMcpServerTool);
+
+    expect($tool->handle(new Request(['city' => 'Paris'])))
+        ->toContain('"url":"https://example.com/report"');
+});
+
+test('it surfaces tool errors with the standard prefix', function (): void {
     $tool = new McpServerTool(new FakeErroringMcpServerTool);
 
     expect($tool->handle(new Request))->toBe('MCP tool error: Something went wrong.');
 });
 
-test('it returns only the final yielded response and ignores notifications and intermediate updates', function () {
+test('it returns only the final yielded response and ignores notifications and intermediate updates', function (): void {
     $tool = new McpServerTool(new FakeStreamingMcpServerTool);
 
     expect($tool->handle(new Request))->toBe('Third.');
 });
 
-test('it returns only the final item from an array response', function () {
+test('it returns only the final item from an array response', function (): void {
     $tool = new McpServerTool(new FakeArrayMcpServerTool);
 
     expect($tool->handle(new Request))->toBe('Third.');
 });
 
-test('the mcp request binding is cleared after the call', function () {
+test('lazily yielded responses still resolve the scoped mcp request', function (): void {
+    $tool = new McpServerTool(new class extends Tool
+    {
+        public function handle(Laravel\Mcp\Request $request): Generator
+        {
+            yield Response::text('First. ');
+            yield Response::text(Container::getInstance()->make(Laravel\Mcp\Request::class)->get('city'));
+        }
+
+        public function schema(JsonSchema $schema): array
+        {
+            return [];
+        }
+    });
+
+    expect($tool->handle(new Request(['city' => 'Paris'])))->toBe('Paris');
+});
+
+test('the mcp request binding is cleared after the call', function (): void {
     $tool = new McpServerTool(new FakeMcpServerTool);
 
     $tool->handle(new Request(['city' => 'Paris']));
 
-    expect(Container::getInstance()->bound('Laravel\\Mcp\\Request'))->toBeFalse();
+    expect(Container::getInstance()->bound(Laravel\Mcp\Request::class))->toBeFalse();
 });

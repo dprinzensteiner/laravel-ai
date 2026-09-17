@@ -8,7 +8,9 @@ use Laravel\Ai\Gateway\StepResponse;
 use Laravel\Ai\Providers\Provider;
 use Laravel\Ai\Responses\Data\Meta;
 use Laravel\Ai\Responses\Data\ToolCall;
+use Laravel\Ai\Responses\Data\UrlCitation;
 use Laravel\Ai\Responses\Data\Usage;
+use Laravel\Ai\Streaming\Events\Citation as CitationEvent;
 use Laravel\Ai\Streaming\Events\Error;
 use Laravel\Ai\Streaming\Events\ProviderToolEvent;
 use Laravel\Ai\Streaming\Events\ReasoningDelta;
@@ -97,12 +99,35 @@ trait HandlesTextGeneration
                 continue;
             }
 
+            if ($type === 'response.output_text.annotation.added') {
+                $annotation = $data['annotation'] ?? [];
+
+                if (($annotation['type'] ?? '') === 'url_citation') {
+                    yield (new CitationEvent(
+                        $this->generateEventId(),
+                        $messageId,
+                        new UrlCitation(
+                            $annotation['url'] ?? '',
+                            $annotation['title'] ?? null,
+                            isset($annotation['start_index']) ? (int) $annotation['start_index'] : null,
+                            isset($annotation['end_index']) ? (int) $annotation['end_index'] : null,
+                        ),
+                        time(),
+                    ))->withInvocationId($invocationId);
+                }
+
+                continue;
+            }
+
             if ($type === 'response.output_text.done' && $textStartEmitted) {
                 yield (new TextEnd(
                     $this->generateEventId(),
                     $messageId,
                     time(),
                 ))->withInvocationId($invocationId);
+
+                $textStartEmitted = false;
+                $messageId = $this->generateEventId();
 
                 continue;
             }
@@ -163,14 +188,15 @@ trait HandlesTextGeneration
                         $data['item'] ?? [],
                         'completed',
                         time(),
+                        provider: $provider->name(),
                     ))->withInvocationId($invocationId);
 
                     continue;
                 }
             }
 
-            if (str_starts_with($type, 'response.') && str_contains($type, '_call.')) {
-                $parts = explode('.', $type, 3);
+            if (str_starts_with((string) $type, 'response.') && str_contains((string) $type, '_call.')) {
+                $parts = explode('.', (string) $type, 3);
 
                 if (count($parts) === 3 && str_ends_with($parts[1], '_call')) {
                     yield (new ProviderToolEvent(
@@ -180,6 +206,7 @@ trait HandlesTextGeneration
                         $data,
                         $parts[2],
                         time(),
+                        provider: $provider->name(),
                     ))->withInvocationId($invocationId);
 
                     continue;
@@ -218,6 +245,7 @@ trait HandlesTextGeneration
                         break;
                     }
                 }
+
                 unset($call);
 
                 continue;
@@ -264,15 +292,8 @@ trait HandlesTextGeneration
                 $response = $data['response'] ?? [];
                 $responseData = $response;
                 $responseId = $response['id'] ?? $responseId;
-                $responseUsage = $response['usage'] ?? [];
 
-                $usage = new Usage(
-                    ($responseUsage['input_tokens'] ?? 0) - ($responseUsage['input_tokens_details']['cached_tokens'] ?? 0),
-                    $responseUsage['output_tokens'] ?? 0,
-                    0,
-                    $responseUsage['input_tokens_details']['cached_tokens'] ?? 0,
-                    $responseUsage['output_tokens_details']['reasoning_tokens'] ?? 0,
-                );
+                $usage = $this->extractUsage($response);
             }
         }
 
@@ -283,6 +304,9 @@ trait HandlesTextGeneration
             usage: $usage ?? new Usage(0, 0),
             meta: new Meta($provider->name(), $responseData['model'] ?? $model),
             continuationToken: $responseId,
+            providerContentBlocks: $this->isStateless($provider)
+                ? $this->extractReplayBlocks($responseData['output'] ?? [])
+                : [],
         );
     }
 

@@ -6,6 +6,8 @@ use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Storage;
 use InvalidArgumentException;
+use Laravel\Ai\Contracts\HasProviderOptions;
+use Laravel\Ai\Enums\Lab;
 use Laravel\Ai\Files\Base64Document;
 use Laravel\Ai\Files\Base64Image;
 use Laravel\Ai\Files\File;
@@ -17,22 +19,28 @@ use Laravel\Ai\Files\RemoteDocument;
 use Laravel\Ai\Files\RemoteImage;
 use Laravel\Ai\Files\StoredDocument;
 use Laravel\Ai\Files\StoredImage;
+use Laravel\Ai\Gateway\Concerns\ResolvesDocumentFilenames;
+use Laravel\Ai\Providers\Provider;
 
 trait MapsAttachments
 {
+    use ResolvesDocumentFilenames;
+
     /**
      * Map the given Laravel attachments to OpenAI content parts.
      */
-    protected function mapAttachments(Collection $attachments): array
+    protected function mapAttachments(Collection $attachments, Provider $provider): array
     {
-        return $attachments->map(function ($attachment) {
+        $providerKey = Lab::tryFrom($provider->driver()) ?? $provider->driver();
+
+        return $attachments->map(function ($attachment) use ($providerKey): array {
             if (! $attachment instanceof File && ! $attachment instanceof UploadedFile) {
                 throw new InvalidArgumentException(
-                    'Unsupported attachment type ['.get_class($attachment).']'
+                    'Unsupported attachment type ['.$attachment::class.']'
                 );
             }
 
-            return match (true) {
+            $part = match (true) {
                 $attachment instanceof ProviderImage => [
                     'type' => 'input_image',
                     'file_id' => $attachment->id,
@@ -52,7 +60,7 @@ trait MapsAttachments
                 $attachment instanceof StoredImage => [
                     'type' => 'input_image',
                     'image_url' => 'data:'.($attachment->mimeType() ?? 'image/png').';base64,'.base64_encode(
-                        Storage::disk($attachment->disk)->get($attachment->path)
+                        (string) Storage::disk($attachment->disk)->get($attachment->path)
                     ),
                 ],
                 $attachment instanceof ProviderDocument => array_filter([
@@ -77,7 +85,7 @@ trait MapsAttachments
                 $attachment instanceof StoredDocument => [
                     'type' => 'input_file',
                     'file_data' => 'data:'.($attachment->mimeType() ?? 'application/octet-stream').';base64,'.base64_encode(
-                        Storage::disk($attachment->disk)->get($attachment->path)
+                        (string) Storage::disk($attachment->disk)->get($attachment->path)
                     ),
                     'filename' => $attachment->name() ?? $this->fallbackFilename($attachment->mimeType()),
                 ],
@@ -90,8 +98,12 @@ trait MapsAttachments
                     'file_data' => 'data:'.$attachment->getClientMimeType().';base64,'.base64_encode($attachment->get()),
                     'filename' => $attachment->getClientOriginalName(),
                 ],
-                default => throw new InvalidArgumentException('Unsupported attachment type ['.get_class($attachment).']'),
+                default => throw new InvalidArgumentException('Unsupported attachment type ['.$attachment::class.']'),
             };
+
+            return $attachment instanceof HasProviderOptions
+                ? array_merge($attachment->providerOptions($providerKey), $part)
+                : $part;
         })->all();
     }
 
@@ -105,19 +117,7 @@ trait MapsAttachments
             'image/png',
             'image/gif',
             'image/webp',
-        ]);
-    }
-
-    protected function fallbackFilename(?string $mimeType): string
-    {
-        return 'document'.match ($mimeType) {
-            'text/plain' => '.txt',
-            'text/markdown' => '.md',
-            'text/csv' => '.csv',
-            'text/html' => '.html',
-            'application/pdf' => '.pdf',
-            'application/json' => '.json',
-            default => '',
-        };
+        ],
+            true);
     }
 }

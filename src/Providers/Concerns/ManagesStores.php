@@ -50,7 +50,7 @@ trait ManagesStores
 
         return tap(
             $this->storeGateway()->createStore($this, $name, $description, $fileIds, $expiresWhenIdleFor),
-            function (Store $store) use ($invocationId, $name, $description, $fileIds, $expiresWhenIdleFor) {
+            function (Store $store) use ($invocationId, $name, $description, $fileIds, $expiresWhenIdleFor): void {
                 $this->events->dispatch(new StoreCreated(
                     $invocationId, $this, $name, $description, $fileIds, $expiresWhenIdleFor, $store,
                 ));
@@ -80,7 +80,7 @@ trait ManagesStores
             $invocationId, $this, $storeId, $identifier
         ));
 
-        return tap($upload(), function (string $documentId) use ($invocationId, $storeId, $identifier) {
+        return tap($upload(), function (string $documentId) use ($invocationId, $storeId, $identifier): void {
             $this->events->dispatch(new FileAddedToStore(
                 $invocationId, $this, $storeId, $identifier, $documentId,
             ));
@@ -106,7 +106,7 @@ trait ManagesStores
 
         return tap(
             $this->storeGateway()->removeFile($this, $storeId, $documentId),
-            function () use ($invocationId, $storeId, $documentId) {
+            function () use ($invocationId, $storeId, $documentId): void {
                 $this->events->dispatch(new FileRemovedFromStore(
                     $invocationId, $this, $storeId, $documentId,
                 ));

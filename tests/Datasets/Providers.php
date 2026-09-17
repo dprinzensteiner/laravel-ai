@@ -32,7 +32,6 @@ dataset('diarization-providers', [
 ]);
 
 dataset('image-providers', [
-    'openai-dall-e-3' => ['openai', 'OPENAI_API_KEY', 'dall-e-3'],
     'openai-gpt-image-2' => ['openai', 'OPENAI_API_KEY', 'gpt-image-2'],
     'xai' => ['xai', 'XAI_API_KEY', 'grok-imagine-image'],
     'gemini-2.5-flash-image' => ['gemini', 'GEMINI_API_KEY', 'gemini-2.5-flash-image'],
@@ -60,6 +59,7 @@ dataset('file-search-providers', [
 
 dataset('reranking-providers', [
     'cohere' => ['cohere', 'COHERE_API_KEY'],
+    'openrouter' => ['openrouter', 'OPENROUTER_API_KEY'],
     'voyageai' => ['voyageai', 'VOYAGEAI_API_KEY'],
 ]);
 
@@ -74,6 +74,11 @@ dataset('agent-providers', [
     'openai' => ['openai', 'OPENAI_API_KEY', 'gpt-5.4-nano'],
     'openrouter' => ['openrouter', 'OPENROUTER_API_KEY', 'anthropic/claude-haiku-4.5'],
     'xai' => ['xai', 'XAI_API_KEY', 'grok-4.20-non-reasoning'],
+]);
+
+dataset('tool-search-providers', [
+    'anthropic' => ['anthropic', 'ANTHROPIC_API_KEY', 'claude-haiku-4-5-20251001'],
+    'openai' => ['openai', 'OPENAI_API_KEY', 'gpt-5.4'],
 ]);
 
 dataset('agent-document-providers', [

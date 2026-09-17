@@ -14,6 +14,7 @@ use Laravel\Ai\Streaming\Events\ProviderToolEvent;
 use Laravel\Ai\Streaming\Events\ReasoningDelta;
 use Laravel\Ai\Streaming\Events\ReasoningEnd;
 use Laravel\Ai\Streaming\Events\ReasoningStart;
+use Laravel\Ai\Streaming\Events\StreamEvent;
 use Laravel\Ai\Streaming\Events\StreamStart;
 use Laravel\Ai\Streaming\Events\TextDelta;
 use Laravel\Ai\Streaming\Events\TextEnd;
@@ -54,7 +55,7 @@ trait HandlesTextStreaming
         $usage = null;
         $stopReason = '';
 
-        $emitTextStart = function () use (&$textStartEmitted, $messageId, $invocationId) {
+        $emitTextStart = function () use (&$textStartEmitted, &$messageId, $invocationId): ?StreamEvent {
             if ($textStartEmitted) {
                 return null;
             }
@@ -68,7 +69,7 @@ trait HandlesTextStreaming
             ))->withInvocationId($invocationId);
         };
 
-        $emitReasoningStart = function () use (&$reasoningStartEmitted, &$reasoningId, $invocationId) {
+        $emitReasoningStart = function () use (&$reasoningStartEmitted, &$reasoningId, $invocationId): ?StreamEvent {
             if ($reasoningStartEmitted) {
                 return null;
             }
@@ -124,14 +125,14 @@ trait HandlesTextStreaming
                 if ($blockType === 'text') {
                     $currentBlockText = '';
 
-                    if ($event = $emitTextStart()) {
+                    if (($event = $emitTextStart()) instanceof StreamEvent) {
                         yield $event;
                     }
                 } elseif ($blockType === 'thinking') {
                     $currentThinkingText = '';
                     $currentSignature = '';
 
-                    if ($event = $emitReasoningStart()) {
+                    if (($event = $emitReasoningStart()) instanceof StreamEvent) {
                         yield $event;
                     }
                 } elseif ($blockType === 'tool_use') {
@@ -152,8 +153,20 @@ trait HandlesTextStreaming
                         $data['content_block'] ?? [],
                         'started',
                         time(),
+                        provider: $provider->name(),
                     ))->withInvocationId($invocationId);
                 } elseif ($this->isProviderToolResultBlock($blockType)) {
+                    $fetchResult = $data['content_block']['content'] ?? [];
+
+                    if ($blockType === 'web_fetch_tool_result' && ($fetchResult['type'] ?? '') === 'web_fetch_result' && filled($fetchResult['url'] ?? null)) {
+                        yield (new CitationEvent(
+                            $this->generateEventId(),
+                            $messageId,
+                            new UrlCitation($fetchResult['url'], $fetchResult['content']['title'] ?? null),
+                            time(),
+                        ))->withInvocationId($invocationId);
+                    }
+
                     yield (new ProviderToolEvent(
                         $this->generateEventId(),
                         $data['content_block']['tool_use_id'] ?? $data['content_block']['id'] ?? '',
@@ -161,6 +174,7 @@ trait HandlesTextStreaming
                         $data['content_block'] ?? [],
                         'result_received',
                         time(),
+                        provider: $provider->name(),
                     ))->withInvocationId($invocationId);
                 }
 
@@ -179,7 +193,7 @@ trait HandlesTextStreaming
                     $textDelta = (string) ($data['delta']['text'] ?? '');
 
                     if ($textDelta !== '') {
-                        if ($event = $emitTextStart()) {
+                        if (($event = $emitTextStart()) instanceof StreamEvent) {
                             yield $event;
                         }
 
@@ -197,7 +211,7 @@ trait HandlesTextStreaming
                     $delta = (string) ($data['delta']['thinking'] ?? '');
 
                     if ($delta !== '') {
-                        if ($event = $emitReasoningStart()) {
+                        if (($event = $emitReasoningStart()) instanceof StreamEvent) {
                             yield $event;
                         }
 
@@ -249,6 +263,7 @@ trait HandlesTextStreaming
                     ))->withInvocationId($invocationId);
 
                     $textStartEmitted = false;
+                    $messageId = $this->generateEventId();
                 } elseif ($currentBlockType === 'thinking' && $reasoningStartEmitted) {
                     if (isset($responseContent[$currentBlockIndex])) {
                         $responseContent[$currentBlockIndex]['thinking'] = $currentThinkingText;
@@ -297,6 +312,7 @@ trait HandlesTextStreaming
                         $responseContent[$index] ?? [],
                         'completed',
                         time(),
+                        provider: $provider->name(),
                     ))->withInvocationId($invocationId);
                 }
 
@@ -308,6 +324,11 @@ trait HandlesTextStreaming
             if ($type === 'message_delta') {
                 $stopReason = $data['delta']['stop_reason'] ?? '';
                 $deltaUsage = $data['usage'] ?? [];
+
+                // Usage on message_delta is cumulative for the whole message...
+                $inputTokens = $deltaUsage['input_tokens'] ?? $inputTokens;
+                $cacheCreationTokens = $deltaUsage['cache_creation_input_tokens'] ?? $cacheCreationTokens;
+                $cacheReadTokens = $deltaUsage['cache_read_input_tokens'] ?? $cacheReadTokens;
 
                 $usage = new Usage(
                     $inputTokens,

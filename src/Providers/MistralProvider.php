@@ -4,11 +4,13 @@ namespace Laravel\Ai\Providers;
 
 use Illuminate\Contracts\Events\Dispatcher;
 use InvalidArgumentException;
+use Laravel\Ai\Contracts\Gateway\AudioGateway;
 use Laravel\Ai\Contracts\Gateway\EmbeddingGateway;
 use Laravel\Ai\Contracts\Gateway\FileGateway;
 use Laravel\Ai\Contracts\Gateway\StepTextGateway;
 use Laravel\Ai\Contracts\Gateway\StoreGateway;
 use Laravel\Ai\Contracts\Gateway\TranscriptionGateway;
+use Laravel\Ai\Contracts\Providers\AudioProvider;
 use Laravel\Ai\Contracts\Providers\EmbeddingProvider;
 use Laravel\Ai\Contracts\Providers\FileProvider;
 use Laravel\Ai\Contracts\Providers\StoreProvider;
@@ -21,11 +23,13 @@ use Laravel\Ai\Gateway\Mistral\MistralGateway;
 use Laravel\Ai\Gateway\Mistral\MistralStoreGateway;
 use Laravel\Ai\Providers\Tools\FileSearch;
 
-class MistralProvider extends Provider implements EmbeddingProvider, FileProvider, StoreProvider, SupportsFileSearch, TextProvider, TranscriptionProvider, UploadsDocumentsToStore
+class MistralProvider extends Provider implements AudioProvider, EmbeddingProvider, FileProvider, StoreProvider, SupportsFileSearch, TextProvider, TranscriptionProvider, UploadsDocumentsToStore
 {
+    use Concerns\GeneratesAudio;
     use Concerns\GeneratesEmbeddings;
     use Concerns\GeneratesText;
     use Concerns\GeneratesTranscriptions;
+    use Concerns\HasAudioGateway;
     use Concerns\HasEmbeddingGateway;
     use Concerns\HasFileGateway;
     use Concerns\HasStoreGateway;
@@ -49,6 +53,14 @@ class MistralProvider extends Provider implements EmbeddingProvider, FileProvide
     protected function mistralGateway(): MistralGateway
     {
         return $this->mistralGateway ??= new MistralGateway($this->events);
+    }
+
+    /**
+     * Get the provider's audio gateway.
+     */
+    public function audioGateway(): AudioGateway
+    {
+        return $this->audioGateway ??= $this->mistralGateway();
     }
 
     /**
@@ -96,7 +108,7 @@ class MistralProvider extends Provider implements EmbeddingProvider, FileProvide
      */
     public function defaultTextModel(): string
     {
-        return $this->config['models']['text']['default'] ?? 'mistral-medium-latest';
+        return $this->config['models']['text']['default'] ?? 'mistral-large-2512';
     }
 
     /**
@@ -104,7 +116,7 @@ class MistralProvider extends Provider implements EmbeddingProvider, FileProvide
      */
     public function cheapestTextModel(): string
     {
-        return $this->config['models']['text']['cheapest'] ?? 'mistral-small-latest';
+        return $this->config['models']['text']['cheapest'] ?? 'mistral-small-2603';
     }
 
     /**
@@ -112,7 +124,15 @@ class MistralProvider extends Provider implements EmbeddingProvider, FileProvide
      */
     public function smartestTextModel(): string
     {
-        return $this->config['models']['text']['smartest'] ?? 'mistral-large-latest';
+        return $this->config['models']['text']['smartest'] ?? 'mistral-medium-3-5';
+    }
+
+    /**
+     * Get the name of the default audio (TTS) model.
+     */
+    public function defaultAudioModel(): string
+    {
+        return $this->config['models']['audio']['default'] ?? 'voxtral-mini-tts-2603';
     }
 
     /**
@@ -120,7 +140,7 @@ class MistralProvider extends Provider implements EmbeddingProvider, FileProvide
      */
     public function defaultTranscriptionModel(): string
     {
-        return $this->config['models']['transcription']['default'] ?? 'voxtral-mini-latest';
+        return $this->config['models']['transcription']['default'] ?? 'voxtral-mini-2602';
     }
 
     /**
@@ -128,7 +148,7 @@ class MistralProvider extends Provider implements EmbeddingProvider, FileProvide
      */
     public function defaultEmbeddingsModel(): string
     {
-        return $this->config['models']['embeddings']['default'] ?? 'mistral-embed';
+        return $this->config['models']['embeddings']['default'] ?? 'mistral-embed-2312';
     }
 
     /**

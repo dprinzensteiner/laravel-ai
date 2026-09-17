@@ -3,6 +3,7 @@
 namespace Laravel\Ai\Gateway\Mistral\Concerns;
 
 use Illuminate\Support\Arr;
+use Laravel\Ai\Attributes\Strict;
 use Laravel\Ai\Contracts\Providers\SupportsFileSearch;
 use Laravel\Ai\Contracts\Tool;
 use Laravel\Ai\Gateway\TextGenerationOptions;
@@ -46,7 +47,7 @@ trait BuildsConversationRequests
             'temperature' => $options?->temperature,
             'top_p' => $options?->topP,
             'max_tokens' => $options?->maxTokens,
-            'response_format' => filled($schema) ? $this->buildResponseFormat($schema) : null,
+            'response_format' => filled($schema) ? $this->buildResponseFormat($schema, Strict::isAppliedTo($options?->agent)) : null,
         ]);
 
         if (filled($completionArgs)) {
@@ -163,7 +164,7 @@ trait BuildsConversationRequests
                 'object' => 'entry',
                 'type' => 'function.result',
                 'tool_call_id' => $toolResult->resultId ?? $toolResult->id,
-                'result' => $this->serializeToolResultOutput($toolResult->result),
+                'result' => $toolResult->text(),
             ];
         }
     }

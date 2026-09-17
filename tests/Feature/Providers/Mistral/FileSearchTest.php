@@ -81,7 +81,7 @@ test('prompts with file search route to the conversations api', function () {
         $body = json_decode($request->body(), true);
 
         return $request->url() === 'https://api.mistral.ai/v1/conversations'
-            && $body['model'] === 'mistral-medium-latest'
+            && $body['model'] === 'mistral-large-2512'
             && $body['instructions'] === 'Answer from the documents.'
             && $body['store'] === false
             && $body['stream'] === false

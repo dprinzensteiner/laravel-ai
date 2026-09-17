@@ -16,12 +16,14 @@ class FakeStructuredMcpServerTool extends Tool
         return Response::structured([
             'temperature' => 72,
             'conditions' => 'Sunny',
+            'url' => 'https://example.com/report',
         ]);
     }
 
     /**
      * @return array<string, Type>
      */
+    #[\Override]
     public function schema(JsonSchema $schema): array
     {
         return [

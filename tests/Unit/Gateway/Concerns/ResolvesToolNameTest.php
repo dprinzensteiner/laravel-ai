@@ -37,11 +37,6 @@ function resolverHost(): object
     {
         use InvokesTools;
 
-        public function __construct()
-        {
-            $this->initializeToolCallbacks();
-        }
-
         public function callResolve(Tool $tool): string
         {
             return ToolNameResolver::resolve($tool);
@@ -54,24 +49,24 @@ function resolverHost(): object
     };
 }
 
-test('resolveToolName falls back to class basename when tool has no name() method', function () {
+test('resolveToolName falls back to class basename when tool has no name() method', function (): void {
     $host = resolverHost();
 
     expect($host->callResolve(new FixedNumberGenerator))->toBe('FixedNumberGenerator');
 });
 
-test('resolveToolName prefers the declared name() method when present', function () {
+test('resolveToolName prefers the declared name() method when present', function (): void {
     $host = resolverHost();
 
     expect($host->callResolve(new NamedTool('aliased_tool')))
         ->toBe('aliased_tool');
 });
 
-test('resolveToolName falls back when name() is not callable', function () {
+test('resolveToolName falls back when name() is not callable', function (): void {
     expect(ToolNameResolver::resolve(new ProtectedNameTool))->toBe('ProtectedNameTool');
 });
 
-test('findTool matches a tool by its declared name() when multiple share a class', function () {
+test('findTool matches a tool by its declared name() when multiple share a class', function (): void {
     $host = resolverHost();
 
     $tools = [
@@ -85,7 +80,7 @@ test('findTool matches a tool by its declared name() when multiple share a class
         ->and($host->callFind('unknown', $tools))->toBeNull();
 });
 
-test('findTool returns null when no tool matches', function () {
+test('findTool returns null when no tool matches', function (): void {
     $host = resolverHost();
 
     expect($host->callFind('missing', [new FixedNumberGenerator]))->toBeNull();

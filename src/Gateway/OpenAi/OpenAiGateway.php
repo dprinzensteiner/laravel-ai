@@ -5,9 +5,8 @@ namespace Laravel\Ai\Gateway\OpenAi;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Arr;
-use Illuminate\Support\Facades\Storage;
 use InvalidArgumentException;
-use Laravel\Ai\Contracts\Files\HasName;
+use Laravel\Ai\Contracts\Files\StorableFile;
 use Laravel\Ai\Contracts\Files\TranscribableAudio;
 use Laravel\Ai\Contracts\Gateway\Gateway;
 use Laravel\Ai\Contracts\Gateway\StepTextGateway;
@@ -15,12 +14,10 @@ use Laravel\Ai\Contracts\Providers\AudioProvider;
 use Laravel\Ai\Contracts\Providers\EmbeddingProvider;
 use Laravel\Ai\Contracts\Providers\ImageProvider;
 use Laravel\Ai\Contracts\Providers\TranscriptionProvider;
-use Laravel\Ai\Files\File;
 use Laravel\Ai\Files\Image;
-use Laravel\Ai\Files\LocalImage;
-use Laravel\Ai\Files\StoredImage;
 use Laravel\Ai\Gateway\Concerns\HandlesFailoverErrors;
 use Laravel\Ai\Gateway\Concerns\ParsesServerSentEvents;
+use Laravel\Ai\Gateway\Concerns\ResolvesAudioFilenames;
 use Laravel\Ai\Responses\AudioResponse;
 use Laravel\Ai\Responses\Data\GeneratedImage;
 use Laravel\Ai\Responses\Data\Meta;
@@ -43,6 +40,7 @@ class OpenAiGateway implements Gateway, StepTextGateway
     use Concerns\ParsesTextResponses;
     use HandlesFailoverErrors;
     use ParsesServerSentEvents;
+    use ResolvesAudioFilenames;
 
     public function __construct(protected Dispatcher $events)
     {
@@ -77,7 +75,7 @@ class OpenAiGateway implements Gateway, StepTextGateway
         $data = $response->json();
 
         return new ImageResponse(
-            collect($data['data'] ?? [])->map(fn (array $image) => new GeneratedImage(
+            collect($data['data'] ?? [])->map(fn (array $image): GeneratedImage => new GeneratedImage(
                 $image['b64_json'] ?? '',
                 'image/png',
             )),
@@ -125,17 +123,10 @@ class OpenAiGateway implements Gateway, StepTextGateway
         $field = $isGptImage ? 'image[]' : 'image';
 
         foreach ($attachments as $attachment) {
-            if (! $attachment instanceof File && ! $attachment instanceof UploadedFile) {
-                throw new InvalidArgumentException(
-                    'Unsupported attachment type ['.get_class($attachment).']'
-                );
-            }
-
             $content = match (true) {
-                $attachment instanceof LocalImage => file_get_contents($attachment->path),
-                $attachment instanceof StoredImage => Storage::disk($attachment->disk)->get($attachment->path),
+                $attachment instanceof Image && $attachment instanceof StorableFile => $attachment->content(),
                 $attachment instanceof UploadedFile => $attachment->get(),
-                default => throw new InvalidArgumentException('Unsupported image attachment type ['.get_class($attachment).']'),
+                default => throw new InvalidArgumentException('Unsupported image attachment type ['.get_debug_type($attachment).']'),
             };
 
             $request = $request->attach($field, $content, 'image.png');
@@ -226,7 +217,7 @@ class OpenAiGateway implements Gateway, StepTextGateway
 
         return new TranscriptionResponse(
             $data['text'] ?? '',
-            collect($data['segments'] ?? [])->map(fn (array $segment) => new TranscriptionSegment(
+            collect($data['segments'] ?? [])->map(fn (array $segment): TranscriptionSegment => new TranscriptionSegment(
                 $segment['text'] ?? '',
                 $segment['speaker'] ?? '',
                 $segment['start'] ?? 0,
@@ -238,29 +229,6 @@ class OpenAiGateway implements Gateway, StepTextGateway
             ),
             new Meta($provider->name(), $model),
         );
-    }
-
-    /**
-     * Determine the appropriate filename for the audio file based on its MIME type.
-     */
-    protected function audioFilename(TranscribableAudio $audio): string
-    {
-        if ($audio instanceof HasName && $audio->name()) {
-            return $audio->name();
-        }
-
-        $extension = match ($audio->mimeType()) {
-            'audio/webm' => 'webm',
-            'audio/ogg', 'audio/ogg; codecs=opus' => 'ogg',
-            'audio/wav', 'audio/x-wav' => 'wav',
-            'audio/mp4', 'audio/m4a', 'audio/x-m4a' => 'm4a',
-            'audio/flac', 'audio/x-flac' => 'flac',
-            'audio/mpeg', 'audio/mp3' => 'mp3',
-            'audio/mpga' => 'mpga',
-            default => 'mp3',
-        };
-
-        return "audio.{$extension}";
     }
 
     /**

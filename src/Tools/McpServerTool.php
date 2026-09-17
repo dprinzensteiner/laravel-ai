@@ -8,6 +8,8 @@ use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\JsonSchema\Types\Type;
 use Laravel\Ai\Contracts\Tool;
 use Laravel\Ai\Tools\Concerns\NormalizesMcpResult;
+use Laravel\Mcp\Response;
+use Laravel\Mcp\ResponseFactory;
 
 class McpServerTool implements Tool
 {
@@ -16,22 +18,22 @@ class McpServerTool implements Tool
     /**
      * The MCP server tool class name.
      */
-    protected const MCP_SERVER_TOOL = 'Laravel\\Mcp\\Server\\Tool';
+    protected const MCP_SERVER_TOOL = \Laravel\Mcp\Server\Tool::class;
 
     /**
      * The MCP request class name.
      */
-    protected const MCP_REQUEST = 'Laravel\\Mcp\\Request';
+    protected const MCP_REQUEST = \Laravel\Mcp\Request::class;
 
     /**
      * The MCP response class name.
      */
-    protected const MCP_RESPONSE = 'Laravel\\Mcp\\Response';
+    protected const MCP_RESPONSE = Response::class;
 
     /**
      * The MCP response factory class name.
      */
-    protected const MCP_RESPONSE_FACTORY = 'Laravel\\Mcp\\ResponseFactory';
+    protected const MCP_RESPONSE_FACTORY = ResponseFactory::class;
 
     /**
      * Create a new MCP server tool wrapper instance.
@@ -43,7 +45,7 @@ class McpServerTool implements Tool
      */
     public static function supports(mixed $tool): bool
     {
-        return is_object($tool) && is_a($tool, self::MCP_SERVER_TOOL);
+        return $tool instanceof \Laravel\Mcp\Server\Tool;
     }
 
     /**
@@ -76,14 +78,12 @@ class McpServerTool implements Tool
         $container->instance(self::MCP_REQUEST, new (self::MCP_REQUEST)($request->toArray()));
 
         try {
-            $response = $container->call([$this->tool, 'handle']);
+            return $this->convertResponse($container->call([$this->tool, 'handle']));
         } finally {
             $previous !== null
                 ? $container->instance(self::MCP_REQUEST, $previous)
                 : $container->forgetInstance(self::MCP_REQUEST);
         }
-
-        return $this->convertResponse($response);
     }
 
     /**

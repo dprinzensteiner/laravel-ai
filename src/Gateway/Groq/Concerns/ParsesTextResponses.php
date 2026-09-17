@@ -48,7 +48,7 @@ trait ParsesTextResponses
         $usage = $this->extractUsage($data);
         $finishReason = $this->extractFinishReason($choice);
 
-        $mappedToolCalls = array_map(fn (array $toolCall) => new ToolCall(
+        $mappedToolCalls = array_map(fn (array $toolCall): ToolCall => new ToolCall(
             $toolCall['id'] ?? '',
             $toolCall['function']['name'] ?? '',
             json_decode($toolCall['function']['arguments'] ?? '{}', true) ?? [],
@@ -75,7 +75,7 @@ trait ParsesTextResponses
         $completionDetails = $usage['completion_tokens_details'] ?? [];
 
         return new Usage(
-            promptTokens: $usage['prompt_tokens'] ?? 0,
+            promptTokens: ($usage['prompt_tokens'] ?? 0) - ($promptDetails['cached_tokens'] ?? 0),
             completionTokens: $usage['completion_tokens'] ?? 0,
             cacheReadInputTokens: $promptDetails['cached_tokens'] ?? 0,
             reasoningTokens: $completionDetails['reasoning_tokens'] ?? 0,

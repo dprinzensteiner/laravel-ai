@@ -50,7 +50,7 @@ trait ParsesTextResponses
         $text = $message['content'] ?? '';
         $rawToolCalls = $message['tool_calls'] ?? [];
 
-        $mappedToolCalls = array_map(fn (array $toolCall) => new ToolCall(
+        $mappedToolCalls = array_map(fn (array $toolCall): ToolCall => new ToolCall(
             $toolCall['id'] ?? '',
             $toolCall['function']['name'] ?? '',
             json_decode($toolCall['function']['arguments'] ?? '{}', true) ?? [],
@@ -83,7 +83,7 @@ trait ParsesTextResponses
         $details = $usage['completion_tokens_details'] ?? [];
 
         return new Usage(
-            promptTokens: $usage['prompt_tokens'] ?? 0,
+            promptTokens: ($usage['prompt_tokens'] ?? 0) - ($usage['prompt_cache_hit_tokens'] ?? 0),
             completionTokens: $usage['completion_tokens'] ?? 0,
             cacheReadInputTokens: $usage['prompt_cache_hit_tokens'] ?? 0,
             reasoningTokens: $details['reasoning_tokens'] ?? 0,

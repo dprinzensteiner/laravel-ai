@@ -11,6 +11,7 @@ use Laravel\Ai\Contracts\Providers\FileProvider;
 use Laravel\Ai\Contracts\Providers\ImageProvider;
 use Laravel\Ai\Contracts\Providers\StoreProvider;
 use Laravel\Ai\Contracts\Providers\SupportsFileSearch;
+use Laravel\Ai\Contracts\Providers\SupportsToolSearch;
 use Laravel\Ai\Contracts\Providers\SupportsWebSearch;
 use Laravel\Ai\Contracts\Providers\TextProvider;
 use Laravel\Ai\Contracts\Providers\TranscriptionProvider;
@@ -20,7 +21,7 @@ use Laravel\Ai\Gateway\OpenAi\OpenAiStoreGateway;
 use Laravel\Ai\Providers\Tools\FileSearch;
 use Laravel\Ai\Providers\Tools\WebSearch;
 
-class OpenAiProvider extends Provider implements AudioProvider, EmbeddingProvider, FileProvider, ImageProvider, StoreProvider, SupportsFileSearch, SupportsWebSearch, TextProvider, TranscriptionProvider
+class OpenAiProvider extends Provider implements AudioProvider, EmbeddingProvider, FileProvider, ImageProvider, StoreProvider, SupportsFileSearch, SupportsToolSearch, SupportsWebSearch, TextProvider, TranscriptionProvider
 {
     use Concerns\GeneratesAudio;
     use Concerns\GeneratesEmbeddings;
@@ -47,7 +48,7 @@ class OpenAiProvider extends Provider implements AudioProvider, EmbeddingProvide
             'vector_store_ids' => $search->ids(),
             'filters' => filled($search->filters) ? [
                 'type' => 'and',
-                'filters' => (new Collection($search->filters))->map(fn ($filter) => [
+                'filters' => (new Collection($search->filters))->map(fn ($filter): array => [
                     'type' => $filter['type'],
                     'key' => $filter['key'],
                     'value' => $filter['value'],
@@ -88,7 +89,7 @@ class OpenAiProvider extends Provider implements AudioProvider, EmbeddingProvide
      */
     public function defaultTextModel(): string
     {
-        return $this->config['models']['text']['default'] ?? 'gpt-5.4';
+        return $this->config['models']['text']['default'] ?? 'gpt-5.6-terra';
     }
 
     /**
@@ -96,7 +97,7 @@ class OpenAiProvider extends Provider implements AudioProvider, EmbeddingProvide
      */
     public function cheapestTextModel(): string
     {
-        return $this->config['models']['text']['cheapest'] ?? 'gpt-5.4-nano';
+        return $this->config['models']['text']['cheapest'] ?? 'gpt-5.6-luna';
     }
 
     /**
@@ -104,7 +105,7 @@ class OpenAiProvider extends Provider implements AudioProvider, EmbeddingProvide
      */
     public function smartestTextModel(): string
     {
-        return $this->config['models']['text']['smartest'] ?? 'gpt-5.4-pro';
+        return $this->config['models']['text']['smartest'] ?? 'gpt-5.6-sol';
     }
 
     /**

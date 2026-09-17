@@ -1,7 +1,9 @@
 <?php
 
 use Illuminate\Support\Facades\Http;
+use Laravel\Ai\Exceptions\StreamErrorException;
 use Laravel\Ai\Responses\Data\FinishReason;
+use Laravel\Ai\Streaming\Events\Citation as CitationEvent;
 use Laravel\Ai\Streaming\Events\Error;
 use Laravel\Ai\Streaming\Events\ReasoningDelta;
 use Laravel\Ai\Streaming\Events\ReasoningEnd;
@@ -14,14 +16,14 @@ use Laravel\Ai\Streaming\Events\TextStart;
 use Laravel\Ai\Streaming\Events\ToolCall as ToolCallEvent;
 use Tests\Fixtures\Agents\ProviderOptionsWithToolsAgent;
 
-beforeEach(function () {
+beforeEach(function (): void {
     config(['ai.providers.openai' => [
         ...config('ai.providers.openai'),
         'key' => 'test-key',
     ]]);
 });
 
-test('streaming emits text events', function () {
+test('streaming emits text events', function (): void {
     Http::fake([
         'api.openai.com/*' => Http::response(
             body: $this->ssePayload([
@@ -46,7 +48,75 @@ test('streaming emits text events', function () {
         ->and($events[count($events) - 1])->toBeInstanceOf(StreamEnd::class);
 });
 
-test('streaming handles tool calls', function () {
+test('streaming emits citation events for web search url citations', function (): void {
+    Http::fake([
+        'api.openai.com/*' => Http::response(
+            body: $this->ssePayload([
+                $this->responseCreated(),
+                $this->outputTextDelta('Here are sources'),
+                ['type' => 'response.output_text.annotation.added', 'item_id' => 'msg_1', 'output_index' => 0, 'content_index' => 0, 'annotation_index' => 0, 'annotation' => ['type' => 'url_citation', 'url' => 'https://example.com/one', 'title' => 'Example One', 'start_index' => 0, 'end_index' => 10]],
+                ['type' => 'response.output_text.annotation.added', 'item_id' => 'msg_1', 'output_index' => 0, 'content_index' => 0, 'annotation_index' => 1, 'annotation' => ['type' => 'url_citation', 'url' => 'https://example.com/two', 'title' => 'Example Two', 'start_index' => 11, 'end_index' => 25]],
+                $this->outputTextDone('Here are sources'),
+                $this->responseCompleted(10, 5),
+            ]),
+            status: 200,
+            headers: ['Content-Type' => 'text/event-stream'],
+        ),
+    ]);
+
+    $citations = array_values(array_filter($this->collectStreamEvents(), fn ($e): bool => $e instanceof CitationEvent));
+
+    expect($citations)->toHaveCount(2)
+        ->and($citations[0]->citation->url)->toBe('https://example.com/one')
+        ->and($citations[0]->citation->title)->toBe('Example One')
+        ->and($citations[0]->citation->startIndex)->toBe(0)
+        ->and($citations[0]->citation->endIndex)->toBe(10)
+        ->and($citations[1]->citation->url)->toBe('https://example.com/two');
+});
+
+test('streaming starts a new text part after each text end in the same step', function (): void {
+    Http::fake([
+        'api.openai.com/*' => Http::response(
+            body: $this->ssePayload([
+                $this->responseCreated(),
+                $this->outputTextDelta('First'),
+                $this->outputTextDone('First'),
+                $this->outputTextDelta('Second'),
+                $this->outputTextDone('Second'),
+                $this->responseCompleted(10, 5, output: [
+                    [
+                        'type' => 'message',
+                        'status' => 'completed',
+                        'role' => 'assistant',
+                        'content' => [
+                            ['type' => 'output_text', 'text' => 'First'],
+                            ['type' => 'output_text', 'text' => 'Second'],
+                        ],
+                    ],
+                ]),
+            ]),
+            status: 200,
+            headers: ['Content-Type' => 'text/event-stream'],
+        ),
+    ]);
+
+    $events = $this->collectStreamEvents();
+
+    $textStarts = array_values(array_filter($events, fn ($e): bool => $e instanceof TextStart));
+    $textEnds = array_values(array_filter($events, fn ($e): bool => $e instanceof TextEnd));
+    $textDeltas = array_values(array_filter($events, fn ($e): bool => $e instanceof TextDelta));
+
+    expect($textStarts)->toHaveCount(2)
+        ->and($textEnds)->toHaveCount(2)
+        ->and($textDeltas)->toHaveCount(2)
+        ->and($textStarts[0]->messageId)->not->toBe($textStarts[1]->messageId)
+        ->and($textEnds[0]->messageId)->toBe($textStarts[0]->messageId)
+        ->and($textEnds[1]->messageId)->toBe($textStarts[1]->messageId)
+        ->and($textDeltas[0]->messageId)->toBe($textStarts[0]->messageId)
+        ->and($textDeltas[1]->messageId)->toBe($textStarts[1]->messageId);
+});
+
+test('streaming handles tool calls', function (): void {
     Http::fake([
         'api.openai.com/*' => Http::sequence([
             Http::response(
@@ -80,8 +150,8 @@ test('streaming handles tool calls', function () {
 
     $events = $this->collectStreamEvents(agent: new ProviderOptionsWithToolsAgent);
 
-    $toolCallEvents = array_values(array_filter($events, fn ($e) => $e instanceof ToolCallEvent));
-    $streamEnd = array_values(array_filter($events, fn ($e) => $e instanceof StreamEnd))[0];
+    $toolCallEvents = array_values(array_filter($events, fn ($e): bool => $e instanceof ToolCallEvent));
+    $streamEnd = array_values(array_filter($events, fn ($e): bool => $e instanceof StreamEnd))[0];
 
     expect($toolCallEvents)->not->toBeEmpty()
         ->and($toolCallEvents[0]->toolCall->name)->toBe('FixedNumberGenerator')
@@ -91,7 +161,7 @@ test('streaming handles tool calls', function () {
         ->and($streamEnd->usage->completionTokens)->toBe(15);
 });
 
-test('streaming handles reasoning events', function () {
+test('streaming handles reasoning events', function (): void {
     Http::fake([
         'api.openai.com/*' => Http::response(
             body: $this->ssePayload([
@@ -118,11 +188,11 @@ test('streaming handles reasoning events', function () {
         ->toContain(ReasoningDelta::class)
         ->toContain(ReasoningEnd::class);
 
-    $reasoningDelta = array_values(array_filter($events, fn ($e) => $e instanceof ReasoningDelta))[0];
+    $reasoningDelta = array_values(array_filter($events, fn ($e): bool => $e instanceof ReasoningDelta))[0];
     expect($reasoningDelta->delta)->toBe('Let me think...');
 });
 
-test('streaming error event stops stream', function () {
+test('streaming error event stops stream', function (): void {
     Http::fake([
         'api.openai.com/*' => Http::response(
             body: $this->ssePayload([
@@ -133,15 +203,20 @@ test('streaming error event stops stream', function () {
         ),
     ]);
 
-    $events = $this->collectStreamEvents();
+    $error = null;
 
-    expect($events)->toHaveCount(1)
-        ->and($events[0])->toBeInstanceOf(Error::class)
-        ->and($events[0]->type)->toBe('server_error')
-        ->and($events[0]->message)->toBe('Server overloaded');
+    try {
+        $this->collectStreamEvents();
+    } catch (StreamErrorException $exception) {
+        $error = $exception->error;
+    }
+
+    expect($error)->toBeInstanceOf(Error::class)
+        ->and($error->type)->toBe('server_error')
+        ->and($error->message)->toBe('Server overloaded');
 });
 
-test('streaming captures usage from response completed', function () {
+test('streaming captures usage from response completed', function (): void {
     Http::fake([
         'api.openai.com/*' => Http::response(
             body: $this->ssePayload([
@@ -157,14 +232,14 @@ test('streaming captures usage from response completed', function () {
 
     $events = $this->collectStreamEvents();
 
-    $streamEnd = array_values(array_filter($events, fn ($e) => $e instanceof StreamEnd))[0];
+    $streamEnd = array_values(array_filter($events, fn ($e): bool => $e instanceof StreamEnd))[0];
 
     expect($streamEnd->usage->promptTokens)->toBe(37)
         ->and($streamEnd->usage->completionTokens)->toBe(10)
         ->and($streamEnd->usage->cacheReadInputTokens)->toBe(5);
 });
 
-test('streaming finish reason maps correctly', function (string $status, string $type, $expected) {
+test('streaming finish reason maps correctly', function (string $status, string $type, $expected): void {
     Http::fake([
         'api.openai.com/*' => Http::response(
             body: $this->ssePayload([
@@ -182,7 +257,7 @@ test('streaming finish reason maps correctly', function (string $status, string 
 
     $events = $this->collectStreamEvents();
 
-    $streamEnd = array_values(array_filter($events, fn ($e) => $e instanceof StreamEnd))[0];
+    $streamEnd = array_values(array_filter($events, fn ($e): bool => $e instanceof StreamEnd))[0];
 
     expect($streamEnd->reason)->toBe($expected->value);
 })->with([
@@ -193,3 +268,27 @@ test('streaming finish reason maps correctly', function (string $status, string 
     'unknown status maps to Unknown' => ['mystery_status', 'message', FinishReason::Unknown],
     'completed unknown type maps to Unknown' => ['completed', 'mystery_output', FinishReason::Unknown],
 ]);
+
+test('streaming captures cache write tokens from response completed', function (): void {
+    Http::fake([
+        'api.openai.com/*' => Http::response(
+            body: $this->ssePayload([
+                $this->responseCreated(),
+                $this->outputTextDelta('Hello'),
+                $this->outputTextDone('Hello'),
+                $this->responseCompleted(8817, 120, cachedTokens: 0, cacheWriteTokens: 8814),
+            ]),
+            status: 200,
+            headers: ['Content-Type' => 'text/event-stream'],
+        ),
+    ]);
+
+    $events = $this->collectStreamEvents();
+
+    $streamEnd = array_values(array_filter($events, fn ($e): bool => $e instanceof StreamEnd))[0];
+
+    expect($streamEnd->usage->cacheWriteInputTokens)->toBe(8814)
+        ->and($streamEnd->usage->cacheReadInputTokens)->toBe(0)
+        ->and($streamEnd->usage->promptTokens)->toBe(3)
+        ->and($streamEnd->usage->completionTokens)->toBe(120);
+});

@@ -9,7 +9,7 @@ use Laravel\Ai\Contracts\Files\StorableFile;
 use Laravel\Ai\Contracts\Providers\FileProvider;
 use Laravel\Ai\Contracts\Providers\StoreProvider;
 use Laravel\Ai\Contracts\Providers\UploadsDocumentsToStore;
-use Laravel\Ai\Files\Base64Document;
+use Laravel\Ai\Files\LocalDocument;
 use Laravel\Ai\Files\ProviderDocument;
 use Laravel\Ai\Responses\AddedDocumentResponse;
 use Laravel\Ai\Responses\Data\StoreFileCounts;
@@ -32,8 +32,7 @@ class Store
         array $metadata = [],
     ): AddedDocumentResponse {
         if ($file instanceof UploadedFile) {
-            $file = Base64Document::fromUpload($file)
-                ->as($file->getClientOriginalName());
+            $file = LocalDocument::fromUploadedFile($file);
         }
 
         $originalFile = $file;
@@ -153,12 +152,12 @@ class Store
     protected function fileAssertionCallback(Closure|string $fileId): Closure
     {
         if ($fileId instanceof Closure) {
-            return fn ($s, $f) => $s === $this->id && $fileId($f);
+            return fn ($s, $f): bool => $s === $this->id && $fileId($f);
         }
 
         $expectedFileId = str_starts_with($fileId, 'fake_file_') ? $fileId : Files::fakeId($fileId);
 
-        return fn ($s, $f) => $s === $this->id && $this->fileIdMatches($f, $expectedFileId);
+        return fn ($s, $f): bool => $s === $this->id && $this->fileIdMatches($f, $expectedFileId);
     }
 
     /**

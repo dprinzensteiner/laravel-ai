@@ -8,7 +8,6 @@ use Laravel\Ai\Contracts\Files\TranscribableAudio;
 use Laravel\Ai\Enums\Lab;
 use Laravel\Ai\Events\ProviderFailedOver;
 use Laravel\Ai\Exceptions\FailoverableException;
-use Laravel\Ai\FakePendingDispatch;
 use Laravel\Ai\Files\LocalAudio;
 use Laravel\Ai\Files\StoredAudio;
 use Laravel\Ai\Jobs\GenerateTranscription;
@@ -21,7 +20,8 @@ use LogicException;
 
 class PendingTranscriptionGeneration
 {
-    use Conditionable, ResolvesProviderOptions;
+    use Conditionable;
+    use ResolvesProviderOptions;
 
     protected ?string $language = null;
 
@@ -120,8 +120,6 @@ class PendingTranscriptionGeneration
                     is_array($this->providerOptions) ? $this->providerOptions : [],
                 )
             );
-
-            return new QueuedTranscriptionResponse(new FakePendingDispatch);
         }
 
         return new QueuedTranscriptionResponse(

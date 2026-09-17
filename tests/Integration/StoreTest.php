@@ -9,6 +9,7 @@ use Laravel\Ai\Events\StoreDeleted;
 use Laravel\Ai\Files;
 use Laravel\Ai\Files\Document;
 use Laravel\Ai\Providers\Tools\FileSearch;
+use Laravel\Ai\Store;
 use Laravel\Ai\Stores;
 
 use function Illuminate\Support\days;
@@ -33,7 +34,7 @@ function createFileSearchStore(string $provider): array
         metadata: ['company' => 'tailwind'],
     )->fileId;
 
-    $store = retry(60, function () use ($store) {
+    $store = retry(60, function () use ($store): Store {
         $refreshed = $store->refresh();
 
         if ($refreshed->fileCounts->completed < 2) {
@@ -46,7 +47,7 @@ function createFileSearchStore(string $provider): array
     return [$store, array_values(array_filter($fileIds))];
 }
 
-test('can create get and delete store', function (string $provider, string $apiKey) {
+test('can create get and delete store', function (string $provider, string $apiKey): void {
     requiresApiKey($apiKey);
 
     Event::fake();
@@ -72,7 +73,7 @@ test('can create get and delete store', function (string $provider, string $apiK
     Event::assertDispatched(StoreDeleted::class);
 })->with('store-providers');
 
-test('can create store with expiration', function (string $provider, string $apiKey) {
+test('can create store with expiration', function (string $provider, string $apiKey): void {
     requiresApiKey($apiKey);
 
     $created = Stores::create(
@@ -87,7 +88,7 @@ test('can create store with expiration', function (string $provider, string $api
     Stores::delete($created->id, provider: $provider);
 })->with('store-providers');
 
-test('can add and remove file from store', function (string $provider, string $apiKey) {
+test('can add and remove file from store', function (string $provider, string $apiKey): void {
     requiresApiKey($apiKey);
 
     // Create a store...
@@ -129,9 +130,9 @@ test('can add and remove file from store', function (string $provider, string $a
     $store->delete();
 })->with('store-providers');
 
-describe('file search', function () {
-    afterEach(function () {
-        if (isset($this->fileSearchStore)) {
+describe('file search', function (): void {
+    afterEach(function (): void {
+        if (property_exists($this, 'fileSearchStore') && $this->fileSearchStore !== null) {
             $this->fileSearchStore->delete();
         }
 
@@ -140,7 +141,7 @@ describe('file search', function () {
         }
     });
 
-    test('can actually prompt an agent with file search data', function (string $provider, string $apiKey) {
+    test('can actually prompt an agent with file search data', function (string $provider, string $apiKey): void {
         requiresApiKey($apiKey);
 
         $this->provider = $provider;
@@ -156,7 +157,7 @@ describe('file search', function () {
         expect((string) $response)->toContain('Yes')->toContain('Valkey');
     })->with('file-search-providers');
 
-    test('can actually prompt an agent with filtered search data', function () {
+    test('can actually prompt an agent with filtered search data', function (): void {
         requiresApiKey('OPENAI_API_KEY');
 
         $this->provider = 'openai';

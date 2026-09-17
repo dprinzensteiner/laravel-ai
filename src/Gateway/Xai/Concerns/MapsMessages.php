@@ -65,7 +65,7 @@ trait MapsMessages
             $reasoningBlocks = $message->toolCalls
                 ->whereNotNull('reasoningId')
                 ->unique('reasoningId')
-                ->map(fn ($toolCall) => [
+                ->map(fn ($toolCall): array => [
                     'type' => 'reasoning',
                     'id' => $toolCall->reasoningId,
                     'summary' => $toolCall->reasoningSummary ?? [],
@@ -124,20 +124,8 @@ trait MapsMessages
             $input[] = [
                 'type' => 'function_call_output',
                 'call_id' => $toolResult->resultId,
-                'output' => $this->serializeToolResultOutput($toolResult->result),
+                'output' => $toolResult->text(),
             ];
         }
-    }
-
-    /**
-     * Serialize a tool result output value to a string suitable for the API.
-     */
-    protected function serializeToolResultOutput(mixed $output): string
-    {
-        if (is_string($output)) {
-            return $output;
-        }
-
-        return is_array($output) ? json_encode($output) : strval($output);
     }
 }

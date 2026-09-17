@@ -44,7 +44,7 @@ class FakeStoreGateway implements StoreGateway, UploadsDocuments
 
         return tap($this->marshalGetResponse(
             $provider, $response, $storeId
-        ), fn () => $this->currentResponseIndex++);
+        ), fn (): int => $this->currentResponseIndex++);
     }
 
     /**

@@ -3,11 +3,13 @@
 namespace Laravel\Ai\Gateway\Groq\Concerns;
 
 use Illuminate\Support\Arr;
+use Laravel\Ai\Attributes\Strict;
 use Laravel\Ai\Gateway\Concerns\ComposesSchemaInstructions;
 use Laravel\Ai\Gateway\StepContext;
 use Laravel\Ai\Gateway\TextGenerationOptions;
 use Laravel\Ai\ObjectSchema;
 use Laravel\Ai\Providers\Provider;
+use Laravel\Ai\ToolChoice;
 
 trait BuildsTextRequests
 {
@@ -49,7 +51,9 @@ trait BuildsTextRequests
             $mappedTools = $this->mapTools($tools, $provider);
 
             if (filled($mappedTools)) {
-                $body['tool_choice'] = 'auto';
+                $body['tool_choice'] = $options?->toolChoice instanceof ToolChoice
+                    ? $this->mapToolChoice($options->toolChoice)
+                    : 'auto';
                 $body['tools'] = $mappedTools;
                 $hasTools = true;
             }
@@ -63,7 +67,7 @@ trait BuildsTextRequests
         );
 
         if (filled($schema) && ! $inlineSchema) {
-            $body['response_format'] = $this->buildResponseFormat($schema);
+            $body['response_format'] = $this->buildResponseFormat($schema, Strict::isAppliedTo($options?->agent));
         }
 
         if (! is_null($options?->maxTokens)) {
@@ -78,7 +82,7 @@ trait BuildsTextRequests
         $providerOptions = $options?->providerOptions($provider->driver());
 
         if (filled($providerOptions)) {
-            $body = array_merge($body, $providerOptions);
+            return array_merge($body, $providerOptions);
         }
 
         return $body;
@@ -87,9 +91,9 @@ trait BuildsTextRequests
     /**
      * Build the response format options for structured output.
      */
-    protected function buildResponseFormat(array $schema): array
+    protected function buildResponseFormat(array $schema, bool $strict): array
     {
-        $objectSchema = new ObjectSchema($schema);
+        $objectSchema = new ObjectSchema($schema, strict: $strict);
 
         $schemaArray = $objectSchema->toSchema();
 
@@ -98,7 +102,7 @@ trait BuildsTextRequests
             'json_schema' => [
                 'name' => $schemaArray['name'] ?? 'schema_definition',
                 'schema' => Arr::except($schemaArray, ['name']),
-                'strict' => true,
+                'strict' => $strict,
             ],
         ];
     }

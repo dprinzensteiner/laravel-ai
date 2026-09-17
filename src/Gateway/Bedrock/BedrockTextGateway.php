@@ -7,6 +7,9 @@ use Illuminate\JsonSchema\JsonSchemaTypeFactory;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
+use InvalidArgumentException;
+use Laravel\Ai\Attributes\CacheInstructions;
+use Laravel\Ai\Attributes\CacheToolDefinitions;
 use Laravel\Ai\Contracts\Gateway\EmbeddingGateway;
 use Laravel\Ai\Contracts\Gateway\StepTextGateway;
 use Laravel\Ai\Contracts\Providers\EmbeddingProvider;
@@ -15,6 +18,7 @@ use Laravel\Ai\Contracts\Tool;
 use Laravel\Ai\Enums\Lab;
 use Laravel\Ai\Gateway\Bedrock\Concerns\CreatesBedrockClient;
 use Laravel\Ai\Gateway\Bedrock\Concerns\MapsAttachments;
+use Laravel\Ai\Gateway\Cohere\Concerns\ParsesEmbeddings;
 use Laravel\Ai\Gateway\Concerns\DecodesStructuredOutput;
 use Laravel\Ai\Gateway\Concerns\HandlesFailoverErrors;
 use Laravel\Ai\Gateway\StepContext;
@@ -51,6 +55,7 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
     use DecodesStructuredOutput;
     use HandlesFailoverErrors;
     use MapsAttachments;
+    use ParsesEmbeddings;
 
     protected const STRUCTURED_OUTPUT_TOOL = 'structured_output';
 
@@ -84,8 +89,8 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
             );
 
             $result = $response->toArray();
-        } catch (Throwable $e) {
-            throw BedrockException::toAiException($e, $provider->name(), $model);
+        } catch (Throwable $throwable) {
+            throw BedrockException::toAiException($throwable, $provider->name(), $model);
         }
 
         return $this->parseTextResponse($result, $provider, $model, filled($schema));
@@ -115,8 +120,8 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
                 $provider->name(),
                 fn () => $client->converseStream($parameters),
             );
-        } catch (Throwable $e) {
-            throw BedrockException::toAiException($e, $provider->name(), $model);
+        } catch (Throwable $throwable) {
+            throw BedrockException::toAiException($throwable, $provider->name(), $model);
         }
 
         return yield from $this->processTextStream($invocationId, $provider, $model, $response['stream'], filled($schema));
@@ -137,7 +142,7 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
     ): array {
         $conversationMessages = $this->formatMessages($messages);
         $schemaTools = $schema ? $this->buildSchemaTools($schema, $tools) : null;
-        $formattedTools = $schemaTools === null && ! empty($tools) ? $this->formatTools($tools) : null;
+        $formattedTools = $schemaTools === null && $tools !== [] ? $this->formatTools($tools) : null;
 
         return $this->buildConverseParameters(
             $model,
@@ -145,7 +150,7 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
             $conversationMessages,
             $schemaTools,
             $formattedTools,
-            empty($tools),
+            $tools === [],
             $options,
             isFinalStep: $stepContext->isFinalStep,
         );
@@ -196,7 +201,7 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
 
         $finishReason = $this->extractFinishReason($result);
 
-        if (empty($toolCalls) && $structured && $finishReason === FinishReason::ToolCalls) {
+        if ($toolCalls === [] && $structured && $finishReason === FinishReason::ToolCalls) {
             $finishReason = FinishReason::Stop;
         }
 
@@ -247,9 +252,10 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
         $currentReasoningText = '';
         $currentReasoningSignature = '';
         $currentReasoningRedacted = '';
+        $hasReasoningBlocks = false;
         $stopReason = 'stop';
 
-        $emitTextStart = function () use (&$textId, $invocationId, $timestamp) {
+        $emitTextStart = function () use (&$textId, $invocationId, $timestamp): ?StreamEvent {
             if ($textId !== '') {
                 return null;
             }
@@ -263,7 +269,7 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
             ))->withInvocationId($invocationId);
         };
 
-        $emitReasoningStart = function () use (&$reasoningId, $invocationId, $timestamp) {
+        $emitReasoningStart = function () use (&$reasoningId, $invocationId, $timestamp): ?StreamEvent {
             if ($reasoningId !== '') {
                 return null;
             }
@@ -301,23 +307,26 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
                 if (isset($delta['text'])) {
                     $currentBlockType = 'text';
 
-                    if ($emittedEvent = $emitTextStart()) {
-                        yield $emittedEvent;
+                    if ($delta['text'] !== '') {
+                        if (($emittedEvent = $emitTextStart()) instanceof StreamEvent) {
+                            yield $emittedEvent;
+                        }
+
+                        $assistantText .= $delta['text'];
+                        $currentText .= $delta['text'];
+
+                        yield (new TextDelta(
+                            (string) Str::uuid(),
+                            $textId,
+                            $delta['text'],
+                            $timestamp,
+                        ))->withInvocationId($invocationId);
                     }
-
-                    $assistantText .= $delta['text'];
-                    $currentText .= $delta['text'];
-
-                    yield (new TextDelta(
-                        (string) Str::uuid(),
-                        $textId,
-                        $delta['text'],
-                        $timestamp,
-                    ))->withInvocationId($invocationId);
-                } elseif (isset($delta['reasoningContent']['text'])) {
+                } elseif (isset($delta['reasoningContent']['text']) && $delta['reasoningContent']['text'] !== '') {
                     $currentBlockType = 'reasoning';
+                    $hasReasoningBlocks = true;
 
-                    if ($emittedEvent = $emitReasoningStart()) {
+                    if (($emittedEvent = $emitReasoningStart()) instanceof StreamEvent) {
                         yield $emittedEvent;
                     }
 
@@ -329,18 +338,20 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
                         $delta['reasoningContent']['text'],
                         $timestamp,
                     ))->withInvocationId($invocationId);
-                } elseif (isset($delta['reasoningContent']['signature'])) {
+                } elseif (isset($delta['reasoningContent']['signature']) && $delta['reasoningContent']['signature'] !== '') {
                     $currentBlockType = 'reasoning';
+                    $hasReasoningBlocks = true;
 
-                    if ($emittedEvent = $emitReasoningStart()) {
+                    if (($emittedEvent = $emitReasoningStart()) instanceof StreamEvent) {
                         yield $emittedEvent;
                     }
 
                     $currentReasoningSignature .= $delta['reasoningContent']['signature'];
-                } elseif (isset($delta['reasoningContent']['redactedContent'])) {
+                } elseif (isset($delta['reasoningContent']['redactedContent']) && $delta['reasoningContent']['redactedContent'] !== '') {
                     $currentBlockType = 'reasoning';
+                    $hasReasoningBlocks = true;
 
-                    if ($emittedEvent = $emitReasoningStart()) {
+                    if (($emittedEvent = $emitReasoningStart()) instanceof StreamEvent) {
                         yield $emittedEvent;
                     }
 
@@ -363,12 +374,15 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
                             ],
                         ];
                     } else {
+                        $reasoningText = ['text' => $currentReasoningText];
+
+                        if ($currentReasoningSignature !== '') {
+                            $reasoningText['signature'] = $currentReasoningSignature;
+                        }
+
                         $responseContent[$index] = [
                             'reasoningContent' => [
-                                'reasoningText' => [
-                                    'text' => $currentReasoningText,
-                                    'signature' => $currentReasoningSignature,
-                                ],
+                                'reasoningText' => $reasoningText,
                             ],
                         ];
                     }
@@ -383,14 +397,16 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
                     $currentReasoningSignature = '';
                     $currentReasoningRedacted = '';
                     $reasoningId = '';
-                } elseif ($currentBlockType === 'text' && $textId !== '') {
+                } elseif ($currentBlockType === 'text') {
                     $responseContent[$index] = ['text' => $currentText];
 
-                    yield (new TextEnd(
-                        (string) Str::uuid(),
-                        $textId,
-                        $timestamp,
-                    ))->withInvocationId($invocationId);
+                    if ($textId !== '') {
+                        yield (new TextEnd(
+                            (string) Str::uuid(),
+                            $textId,
+                            $timestamp,
+                        ))->withInvocationId($invocationId);
+                    }
 
                     $currentText = '';
                     $textId = '';
@@ -453,8 +469,17 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
 
         $finishReason = $this->extractFinishReason(['stopReason' => $stopReason]);
 
-        if (empty($toolCalls) && $structured && $finishReason === FinishReason::ToolCalls) {
+        if ($toolCalls === [] && $structured && $finishReason === FinishReason::ToolCalls) {
             $finishReason = FinishReason::Stop;
+        }
+
+        $providerContentBlocks = array_values($responseContent);
+
+        if (! $hasReasoningBlocks) {
+            $providerContentBlocks = array_values(array_filter(
+                $providerContentBlocks,
+                fn (array $block) => ! isset($block['text']) || $block['text'] !== '',
+            ));
         }
 
         return new StepResponse(
@@ -464,7 +489,7 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
             usage: $totalUsage,
             meta: new Meta($provider->name(), $model),
             structured: $structuredOutput !== null ? $this->decodeStructuredOutput($structuredOutput) : null,
-            providerContentBlocks: array_values($responseContent),
+            providerContentBlocks: $providerContentBlocks,
         );
     }
 
@@ -481,7 +506,7 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
     ): EmbeddingsResponse {
         $client = $this->createBedrockClient($provider, $timeout);
 
-        if (str_starts_with($model, 'cohere.')) {
+        if ($this->isCohereEmbeddingModel($model)) {
             return $this->generateCohereEmbeddings($provider, $model, $client, $inputs, $providerOptions);
         }
 
@@ -503,7 +528,7 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
                     ]),
                 );
 
-                $result = json_decode($response->get('body')->getContents(), true);
+                $result = json_decode((string) $response->get('body')->getContents(), true);
             } catch (Throwable $e) {
                 throw BedrockException::toAiException($e, $provider->name(), $model);
             }
@@ -549,21 +574,28 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
                 ]),
             );
 
-            $result = json_decode($response->get('body')->getContents(), true);
-        } catch (Throwable $e) {
-            throw BedrockException::toAiException($e, $provider->name(), $model);
+            $result = json_decode((string) $response->get('body')->getContents(), true);
+        } catch (Throwable $throwable) {
+            throw BedrockException::toAiException($throwable, $provider->name(), $model);
         }
 
-        $embeddings = array_values(array_filter(
-            $result['embeddings'] ?? [],
-            fn ($vector) => is_array($vector),
-        ));
+        // Cohere's Bedrock response body carries no usage, but the input token
+        // count is reported in the `x-amzn-bedrock-input-token-count` header.
+        $inputTokens = (int) ($response->get('@metadata')['headers']['x-amzn-bedrock-input-token-count'] ?? 0);
 
         return new EmbeddingsResponse(
-            $embeddings,
-            0,
+            $this->parseCohereEmbeddings($result['embeddings'] ?? []),
+            $inputTokens,
             new Meta($provider->name(), $model),
         );
+    }
+
+    /**
+     * Determine if the given model identifier refers to a Cohere embeddings model.
+     */
+    protected function isCohereEmbeddingModel(string $model): bool
+    {
+        return str_contains($model, 'cohere.embed-');
     }
 
     /**
@@ -573,7 +605,7 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
      */
     protected function resolveMaxSteps(array $tools, ?TextGenerationOptions $options): int
     {
-        if (empty($tools)) {
+        if ($tools === []) {
             return 1;
         }
 
@@ -616,6 +648,8 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
             'messages' => $conversationMessages,
         ];
 
+        $providerOptions = $options?->providerOptions(Lab::Bedrock) ?? [];
+
         if ($instructions) {
             $parameters['system'] = [['text' => $instructions]];
         }
@@ -628,17 +662,43 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
 
         $inferenceConfig = $this->buildInferenceConfig($options);
 
-        if (! empty($inferenceConfig)) {
+        if ($inferenceConfig !== []) {
             $parameters['inferenceConfig'] = $inferenceConfig;
         }
 
-        $providerOptions = $options?->providerOptions(Lab::Bedrock);
+        $parameters = array_merge($parameters, $providerOptions);
 
-        if (! empty($providerOptions)) {
-            $parameters = array_merge($parameters, $providerOptions);
+        $this->ensureValidPromptCacheOrder($options);
+
+        if (isset($parameters['system']) && $options?->cacheInstructions instanceof CacheInstructions) {
+            $parameters['system'][] = $this->cachePoint($options->cacheInstructions->ttl);
+        }
+
+        if (isset($parameters['toolConfig']['tools']) && $options?->cacheToolDefinitions instanceof CacheToolDefinitions) {
+            $parameters['toolConfig']['tools'][] = $this->cachePoint($options->cacheToolDefinitions->ttl);
         }
 
         return $parameters;
+    }
+
+    /**
+     * Ensure longer-lived cache points precede shorter-lived cache points.
+     */
+    protected function ensureValidPromptCacheOrder(?TextGenerationOptions $options): void
+    {
+        if ($options?->cacheInstructions?->ttl === '1h'
+            && $options->cacheToolDefinitions instanceof CacheToolDefinitions
+            && $options->cacheToolDefinitions->ttl !== '1h') {
+            throw new InvalidArgumentException('A one-hour instructions cache requires the tool definitions cache to also use a one-hour TTL.');
+        }
+    }
+
+    /**
+     * Build a Bedrock cache point for the requested TTL.
+     */
+    protected function cachePoint(?string $ttl): array
+    {
+        return ['cachePoint' => Arr::whereNotNull(['type' => 'default', 'ttl' => $ttl])];
     }
 
     /**
@@ -646,7 +706,7 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
      */
     protected function buildInferenceConfig(?TextGenerationOptions $options): array
     {
-        if ($options === null) {
+        if (! $options instanceof TextGenerationOptions) {
             return [];
         }
 
@@ -678,7 +738,7 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
      */
     protected function ensureToolInputIsObject(array $content): array
     {
-        return array_map(function (array $block) {
+        return array_map(function (array $block): array {
             if (isset($block['toolUse'])) {
                 $block['toolUse']['input'] = (object) ($block['toolUse']['input'] ?? []);
             }
@@ -696,11 +756,11 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
     {
         return [
             'role' => 'user',
-            'content' => array_map(fn (ToolResult $toolResult) => [
+            'content' => array_map(fn (ToolResult $toolResult): array => [
                 'toolResult' => [
                     'toolUseId' => $toolResult->id,
                     'content' => [
-                        ['text' => is_string($toolResult->result) ? $toolResult->result : json_encode($toolResult->result)],
+                        ['text' => $toolResult->text()],
                     ],
                 ],
             ], $toolResults),
@@ -756,7 +816,7 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
      */
     protected function formatMessages(array $messages): array
     {
-        return (new Collection($messages))->map(fn ($message) => match (true) {
+        return (new Collection($messages))->map(fn (\Laravel\Ai\Messages\AssistantMessage|\Laravel\Ai\Messages\ToolResultMessage|\Laravel\Ai\Messages\UserMessage|\Laravel\Ai\Messages\Message|array $message): array => match (true) {
             $message instanceof AssistantMessage => $this->formatAssistantMessage($message),
             $message instanceof ToolResultMessage => $this->formatToolResultMessage($message),
             $message instanceof UserMessage => $this->formatUserMessage($message),
@@ -808,7 +868,7 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
                 'toolResult' => [
                     'toolUseId' => $toolResult->id,
                     'content' => [
-                        ['text' => is_string($toolResult->result) ? $toolResult->result : json_encode($toolResult->result)],
+                        ['text' => $toolResult->text()],
                     ],
                 ],
             ];
@@ -863,8 +923,8 @@ class BedrockTextGateway implements EmbeddingGateway, StepTextGateway
     protected function formatTools(array $tools): array
     {
         return (new Collection($tools))
-            ->filter(fn ($tool) => $tool instanceof Tool)
-            ->map(fn (Tool $tool) => [
+            ->filter(fn ($tool): bool => $tool instanceof Tool)
+            ->map(fn (Tool $tool): array => [
                 'toolSpec' => [
                     'name' => ToolNameResolver::resolve($tool),
                     'description' => (string) $tool->description(),

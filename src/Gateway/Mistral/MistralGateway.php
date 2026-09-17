@@ -5,16 +5,18 @@ namespace Laravel\Ai\Gateway\Mistral;
 use Generator;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Support\Collection;
-use Laravel\Ai\Contracts\Files\HasName;
 use Laravel\Ai\Contracts\Files\TranscribableAudio;
+use Laravel\Ai\Contracts\Gateway\AudioGateway;
 use Laravel\Ai\Contracts\Gateway\EmbeddingGateway;
 use Laravel\Ai\Contracts\Gateway\StepTextGateway;
 use Laravel\Ai\Contracts\Gateway\TranscriptionGateway;
+use Laravel\Ai\Contracts\Providers\AudioProvider;
 use Laravel\Ai\Contracts\Providers\EmbeddingProvider;
 use Laravel\Ai\Contracts\Providers\TextProvider;
 use Laravel\Ai\Contracts\Providers\TranscriptionProvider;
 use Laravel\Ai\Gateway\Concerns\HandlesFailoverErrors;
 use Laravel\Ai\Gateway\Concerns\ParsesServerSentEvents;
+use Laravel\Ai\Gateway\Concerns\ResolvesAudioFilenames;
 use Laravel\Ai\Gateway\OpenAiCompatible\Concerns\MapsChatCompletionMessages;
 use Laravel\Ai\Gateway\OpenAiCompatible\Concerns\MapsChatCompletionTools;
 use Laravel\Ai\Gateway\OpenAiCompatible\Concerns\PerformsChatCompletionSteps;
@@ -22,6 +24,7 @@ use Laravel\Ai\Gateway\StepContext;
 use Laravel\Ai\Gateway\StepResponse;
 use Laravel\Ai\Gateway\TextGenerationOptions;
 use Laravel\Ai\Providers\Tools\FileSearch;
+use Laravel\Ai\Responses\AudioResponse;
 use Laravel\Ai\Responses\Data\Meta;
 use Laravel\Ai\Responses\Data\TranscriptionSegment;
 use Laravel\Ai\Responses\Data\Usage;
@@ -32,8 +35,9 @@ use Laravel\Ai\Streaming\Events\TextDelta;
 use Laravel\Ai\Streaming\Events\TextEnd;
 use Laravel\Ai\Streaming\Events\TextStart;
 use Laravel\Ai\Streaming\Events\ToolCall as ToolCallEvent;
+use RuntimeException;
 
-class MistralGateway implements EmbeddingGateway, StepTextGateway, TranscriptionGateway
+class MistralGateway implements AudioGateway, EmbeddingGateway, StepTextGateway, TranscriptionGateway
 {
     use Concerns\BuildsConversationRequests;
     use Concerns\BuildsTextRequests;
@@ -50,6 +54,7 @@ class MistralGateway implements EmbeddingGateway, StepTextGateway, Transcription
         generateTextStep as generateChatCompletionStep;
         generateStreamStep as generateChatCompletionStreamStep;
     }
+    use ResolvesAudioFilenames;
 
     public function __construct(protected Dispatcher $events)
     {
@@ -118,6 +123,46 @@ class MistralGateway implements EmbeddingGateway, StepTextGateway, Transcription
     /**
      * {@inheritdoc}
      */
+    public function generateAudio(
+        AudioProvider $provider,
+        string $model,
+        string $text,
+        string $voice,
+        ?string $instructions = null,
+        int $timeout = 30,
+    ): AudioResponse {
+        $voice = match ($voice) {
+            'default-male' => 'en_paul_neutral',
+            'default-female' => 'gb_jane_neutral',
+            default => $voice,
+        };
+
+        $response = $this->withErrorHandling(
+            $provider->name(),
+            fn () => $this->client($provider, $timeout)->post('audio/speech', [
+                'model' => $model,
+                'input' => $text,
+                'voice_id' => $voice,
+                'response_format' => 'mp3',
+            ]),
+        );
+
+        $encodedAudio = $response->json('audio_data');
+
+        if (! is_string($encodedAudio) || $encodedAudio === '') {
+            throw new RuntimeException('No audio data received from Mistral API.');
+        }
+
+        return new AudioResponse(
+            $encodedAudio,
+            new Meta($provider->name(), $model),
+            'audio/mpeg',
+        );
+    }
+
+    /**
+     * {@inheritdoc}
+     */
     public function generateEmbeddings(
         EmbeddingProvider $provider,
         string $model,
@@ -175,7 +220,7 @@ class MistralGateway implements EmbeddingGateway, StepTextGateway, Transcription
 
         return new TranscriptionResponse(
             $data['text'] ?? '',
-            collect($data['segments'] ?? [])->map(fn (array $segment) => new TranscriptionSegment(
+            collect($data['segments'] ?? [])->map(fn (array $segment): TranscriptionSegment => new TranscriptionSegment(
                 $segment['text'] ?? '',
                 $segment['speaker_id'] ?? '',
                 $segment['start'] ?? 0,
@@ -209,34 +254,11 @@ class MistralGateway implements EmbeddingGateway, StepTextGateway, Transcription
     }
 
     /**
-     * Determine the appropriate filename for the audio file based on its MIME type.
-     */
-    protected function audioFilename(TranscribableAudio $audio): string
-    {
-        if ($audio instanceof HasName && $audio->name()) {
-            return $audio->name();
-        }
-
-        $extension = match ($audio->mimeType()) {
-            'audio/webm' => 'webm',
-            'audio/ogg', 'audio/ogg; codecs=opus' => 'ogg',
-            'audio/wav', 'audio/x-wav' => 'wav',
-            'audio/mp4', 'audio/m4a', 'audio/x-m4a' => 'm4a',
-            'audio/flac', 'audio/x-flac' => 'flac',
-            'audio/mpeg', 'audio/mp3' => 'mp3',
-            'audio/mpga' => 'mpga',
-            default => 'mp3',
-        };
-
-        return "audio.{$extension}";
-    }
-
-    /**
      * Determine if the given tools require the Conversations API.
      */
     protected function wantsFileSearch(array $tools): bool
     {
-        return (new Collection($tools))->contains(fn ($tool) => $tool instanceof FileSearch);
+        return (new Collection($tools))->contains(fn ($tool): bool => $tool instanceof FileSearch);
     }
 
     /**
