@@ -31,12 +31,14 @@ class MistralStoreGateway implements StoreGateway, UploadsDocuments
             fn () => $this->client($provider)->get("libraries/{$storeId}")
         );
 
+        $fileCounts = $this->fileCounts($provider, $response->json('id'), $response->json('nb_documents', 0));
+
         return new Store(
             provider: $provider,
             id: $response->json('id'),
             name: $response->json('name'),
-            fileCounts: $this->fileCounts($provider, $response->json('id'), $response->json('nb_documents', 0)),
-            ready: true,
+            fileCounts: $fileCounts,
+            ready: $fileCounts->pending === 0,
         );
     }
 
@@ -106,7 +108,7 @@ class MistralStoreGateway implements StoreGateway, UploadsDocuments
         if (filled($metadata)) {
             $this->withErrorHandling(
                 $provider->name(),
-                fn () => $this->client($provider)->put("libraries/{$storeId}/documents/{$documentId}", [
+                fn () => $this->client($provider)->patch("libraries/{$storeId}/documents/{$documentId}", [
                     'attributes' => $metadata,
                 ])
             );
@@ -150,7 +152,6 @@ class MistralStoreGateway implements StoreGateway, UploadsDocuments
             return new StoreFileCounts(0, 0, 0);
         }
 
-        $pageSize = 100;
         $documents = new Collection;
         $page = 0;
 
@@ -159,7 +160,7 @@ class MistralStoreGateway implements StoreGateway, UploadsDocuments
                 $provider->name(),
                 fn () => $this->client($provider)->get("libraries/{$storeId}/documents", [
                     'page' => $page,
-                    'page_size' => $pageSize,
+                    'page_size' => 100,
                 ])
             );
 
@@ -167,11 +168,8 @@ class MistralStoreGateway implements StoreGateway, UploadsDocuments
 
             $documents = $documents->merge($pageDocuments);
 
-            $hasMore = filled($pageDocuments)
-                && $response->json('pagination.has_more', count($pageDocuments) === $pageSize);
-
             $page++;
-        } while ($hasMore);
+        } while (filled($pageDocuments) && $response->json('pagination.has_more', false));
 
         $statuses = $documents->countBy(fn (array $document) => match ($document['process_status'] ?? null) {
             'done', 'noop', 'self_managed' => 'completed',

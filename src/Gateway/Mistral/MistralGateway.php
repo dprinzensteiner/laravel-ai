@@ -2,9 +2,7 @@
 
 namespace Laravel\Ai\Gateway\Mistral;
 
-use Generator;
 use Illuminate\Contracts\Events\Dispatcher;
-use Illuminate\Support\Collection;
 use Laravel\Ai\Contracts\Files\TranscribableAudio;
 use Laravel\Ai\Contracts\Gateway\AudioGateway;
 use Laravel\Ai\Contracts\Gateway\EmbeddingGateway;
@@ -12,6 +10,7 @@ use Laravel\Ai\Contracts\Gateway\StepTextGateway;
 use Laravel\Ai\Contracts\Gateway\TranscriptionGateway;
 use Laravel\Ai\Contracts\Providers\AudioProvider;
 use Laravel\Ai\Contracts\Providers\EmbeddingProvider;
+use Laravel\Ai\Contracts\Providers\SupportsFileSearch;
 use Laravel\Ai\Contracts\Providers\TextProvider;
 use Laravel\Ai\Contracts\Providers\TranscriptionProvider;
 use Laravel\Ai\Gateway\Concerns\HandlesFailoverErrors;
@@ -21,9 +20,10 @@ use Laravel\Ai\Gateway\OpenAiCompatible\Concerns\MapsChatCompletionMessages;
 use Laravel\Ai\Gateway\OpenAiCompatible\Concerns\MapsChatCompletionTools;
 use Laravel\Ai\Gateway\OpenAiCompatible\Concerns\PerformsChatCompletionSteps;
 use Laravel\Ai\Gateway\StepContext;
-use Laravel\Ai\Gateway\StepResponse;
 use Laravel\Ai\Gateway\TextGenerationOptions;
+use Laravel\Ai\Providers\Provider;
 use Laravel\Ai\Providers\Tools\FileSearch;
+use Laravel\Ai\Providers\Tools\ProviderTool;
 use Laravel\Ai\Responses\AudioResponse;
 use Laravel\Ai\Responses\Data\Meta;
 use Laravel\Ai\Responses\Data\TranscriptionSegment;
@@ -34,70 +34,21 @@ use RuntimeException;
 
 class MistralGateway implements AudioGateway, EmbeddingGateway, StepTextGateway, TranscriptionGateway
 {
-    use Concerns\BuildsConversationRequests;
     use Concerns\BuildsTextRequests;
     use Concerns\CreatesMistralClient;
-    use Concerns\HandlesConversationStreaming;
     use Concerns\HandlesTextStreaming;
     use Concerns\MapsAttachments;
-    use Concerns\ParsesConversationResponses;
     use Concerns\ParsesTextResponses;
     use HandlesFailoverErrors;
     use MapsChatCompletionMessages;
     use MapsChatCompletionTools;
     use ParsesServerSentEvents;
-    use PerformsChatCompletionSteps {
-        generateTextStep as generateChatCompletionStep;
-        generateStreamStep as generateChatCompletionStreamStep;
-    }
+    use PerformsChatCompletionSteps;
     use ResolvesAudioFilenames;
 
     public function __construct(protected Dispatcher $events)
     {
         //
-    }
-
-    /**
-     * Generate text for a single step, routing to the Conversations API when file search is requested.
-     */
-    public function generateTextStep(
-        TextProvider $provider,
-        string $model,
-        ?string $instructions,
-        array $messages,
-        array $tools,
-        ?array $schema,
-        ?TextGenerationOptions $options,
-        ?int $timeout,
-        StepContext $stepContext,
-    ): StepResponse {
-        if ($this->wantsFileSearch($tools)) {
-            return $this->generateConversationStep($provider, $model, $instructions, $messages, $tools, $schema, $options, $timeout);
-        }
-
-        return $this->generateChatCompletionStep($provider, $model, $instructions, $messages, $tools, $schema, $options, $timeout, $stepContext);
-    }
-
-    /**
-     * Stream text for a single step, routing to the Conversations API when file search is requested.
-     */
-    public function generateStreamStep(
-        string $invocationId,
-        TextProvider $provider,
-        string $model,
-        ?string $instructions,
-        array $messages,
-        array $tools,
-        ?array $schema,
-        ?TextGenerationOptions $options,
-        ?int $timeout,
-        StepContext $stepContext,
-    ): Generator {
-        if ($this->wantsFileSearch($tools)) {
-            return yield from $this->streamConversationStep($invocationId, $provider, $model, $instructions, $messages, $tools, $schema, $options, $timeout);
-        }
-
-        return yield from $this->generateChatCompletionStreamStep($invocationId, $provider, $model, $instructions, $messages, $tools, $schema, $options, $timeout, $stepContext);
     }
 
     /**
@@ -114,6 +65,20 @@ class MistralGateway implements AudioGateway, EmbeddingGateway, StepTextGateway,
         StepContext $stepContext,
     ): array {
         return $this->buildTextRequestBody($provider, $model, $instructions, $messages, $tools, $schema, $options);
+    }
+
+    /**
+     * Map a provider tool to a Chat Completions tool definition.
+     */
+    protected function mapProviderTool(ProviderTool $tool, Provider $provider): array
+    {
+        return match (true) {
+            $tool instanceof FileSearch && $provider instanceof SupportsFileSearch => [
+                'type' => 'document_library',
+                ...$provider->fileSearchToolOptions($tool),
+            ],
+            default => throw new RuntimeException('Mistral does not support ['.class_basename($tool).'] provider tools.'),
+        };
     }
 
     /**
@@ -247,68 +212,5 @@ class MistralGateway implements AudioGateway, EmbeddingGateway, StepTextGateway,
         }
 
         return $parts;
-    }
-
-    /**
-     * Determine if the given tools require the Conversations API.
-     */
-    protected function wantsFileSearch(array $tools): bool
-    {
-        return (new Collection($tools))->contains(fn ($tool): bool => $tool instanceof FileSearch);
-    }
-
-    /**
-     * Generate text for a single step via the Conversations API.
-     */
-    protected function generateConversationStep(
-        TextProvider $provider,
-        string $model,
-        ?string $instructions,
-        array $messages,
-        array $tools,
-        ?array $schema,
-        ?TextGenerationOptions $options,
-        ?int $timeout,
-    ): StepResponse {
-        $body = $this->buildConversationRequestBody($provider, $model, $instructions, $messages, $tools, $schema, $options);
-
-        $response = $this->withErrorHandling(
-            $provider->name(),
-            fn () => $this->client($provider, $timeout)->post('conversations', $body),
-        );
-
-        $data = $response->json();
-
-        $this->validateConversationResponse($data);
-
-        return $this->parseConversationResponse($data, $provider, $model, filled($schema))->withRawResponse($response);
-    }
-
-    /**
-     * Stream text for a single step via the Conversations API.
-     */
-    protected function streamConversationStep(
-        string $invocationId,
-        TextProvider $provider,
-        string $model,
-        ?string $instructions,
-        array $messages,
-        array $tools,
-        ?array $schema,
-        ?TextGenerationOptions $options,
-        ?int $timeout,
-    ): Generator {
-        $body = $this->buildConversationRequestBody($provider, $model, $instructions, $messages, $tools, $schema, $options);
-
-        $body['stream'] = true;
-
-        $response = $this->withErrorHandling(
-            $provider->name(),
-            fn () => $this->client($provider, $timeout)
-                ->withOptions(['stream' => true])
-                ->post('conversations', $body),
-        );
-
-        return yield from $this->processConversationStream($invocationId, $provider, $model, $response->getBody());
     }
 }

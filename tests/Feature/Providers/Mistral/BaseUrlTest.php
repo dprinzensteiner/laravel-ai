@@ -5,7 +5,6 @@ use Illuminate\Support\Facades\Http;
 use Laravel\Ai\Audio;
 use Laravel\Ai\Files;
 use Laravel\Ai\Files\Document;
-use Laravel\Ai\Providers\Tools\FileSearch;
 use Laravel\Ai\Stores;
 
 use function Laravel\Ai\agent;
@@ -117,26 +116,6 @@ test('mistral store requests use the configured base url', function (): void {
     mistralAssertRequestSent('POST', "{$this->customUrl}/libraries/lib-123/documents");
     mistralAssertRequestSent('DELETE', "{$this->customUrl}/libraries/lib-123/documents/doc-123");
     mistralAssertRequestSent('DELETE', "{$this->customUrl}/libraries/lib-123");
-});
-
-test('mistral file search requests use the configured base url', function (): void {
-    configureMistralProvider($this->customUrl);
-
-    Http::fake([
-        '*' => Http::response([
-            'object' => 'conversation.response',
-            'conversation_id' => 'conv-123',
-            'outputs' => [['object' => 'entry', 'type' => 'message.output', 'role' => 'assistant', 'content' => 'Hello from custom']],
-            'usage' => ['prompt_tokens' => 1, 'completion_tokens' => 1, 'total_tokens' => 2],
-        ]),
-    ]);
-
-    $response = agent(tools: [new FileSearch(['lib-123'])])->prompt('Hello', provider: 'mistral');
-
-    expect($response->text)->toBe('Hello from custom');
-
-    Http::assertSentCount(1);
-    mistralAssertRequestSent('POST', "{$this->customUrl}/conversations");
 });
 
 function configureMistralProvider(?string $url = null): void
