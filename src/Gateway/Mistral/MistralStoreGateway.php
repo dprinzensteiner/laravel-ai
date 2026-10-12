@@ -42,8 +42,6 @@ class MistralStoreGateway implements StoreGateway, UploadsDocuments
 
     /**
      * Create a new vector store.
-     *
-     * Mistral libraries do not support idle expiration; the interval is ignored.
      */
     public function createStore(
         StoreProvider $provider,
@@ -66,7 +64,13 @@ class MistralStoreGateway implements StoreGateway, UploadsDocuments
             ]))
         );
 
-        return $this->getStore($provider, $response->json('id'));
+        return new Store(
+            provider: $provider,
+            id: $response->json('id'),
+            name: $response->json('name'),
+            fileCounts: new StoreFileCounts(0, 0, 0),
+            ready: true,
+        );
     }
 
     /**
@@ -80,9 +84,7 @@ class MistralStoreGateway implements StoreGateway, UploadsDocuments
     }
 
     /**
-     * Upload a document's contents directly into the library.
-     *
-     * Mistral document uploads do not accept metadata, so it is applied as document attributes afterwards.
+     * Upload a document's contents directly into the library, then apply metadata as document attributes.
      */
     public function uploadDocument(
         StoreProvider $provider,
@@ -104,7 +106,7 @@ class MistralStoreGateway implements StoreGateway, UploadsDocuments
         if (filled($metadata)) {
             $this->withErrorHandling(
                 $provider->name(),
-                fn () => $this->client($provider)->patch("libraries/{$storeId}/documents/{$documentId}", [
+                fn () => $this->client($provider)->put("libraries/{$storeId}/documents/{$documentId}", [
                     'attributes' => $metadata,
                 ])
             );
@@ -172,7 +174,7 @@ class MistralStoreGateway implements StoreGateway, UploadsDocuments
         } while ($hasMore);
 
         $statuses = $documents->countBy(fn (array $document) => match ($document['process_status'] ?? null) {
-            'done' => 'completed',
+            'done', 'noop', 'self_managed' => 'completed',
             'error', 'missing_content' => 'failed',
             default => 'pending',
         });

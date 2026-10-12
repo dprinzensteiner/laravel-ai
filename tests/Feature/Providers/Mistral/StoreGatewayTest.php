@@ -171,34 +171,41 @@ test('get store keeps paginating while the api reports more pages', function () 
     Http::assertSentCount(3);
 });
 
-test('get store counts documents with missing content as failed', function () {
+test('get store maps every document process status', function () {
     Http::fake([
         'api.mistral.ai/v1/libraries/lib-123/documents*' => Http::response([
             'data' => [
-                ['id' => 'doc-1', 'process_status' => 'missing_content'],
-                ['id' => 'doc-2', 'process_status' => 'waiting_for_capacity'],
-                ['id' => 'doc-3', 'process_status' => 'todo'],
+                ['id' => 'doc-1', 'process_status' => 'done'],
+                ['id' => 'doc-2', 'process_status' => 'noop'],
+                ['id' => 'doc-3', 'process_status' => 'self_managed'],
+                ['id' => 'doc-4', 'process_status' => 'todo'],
+                ['id' => 'doc-5', 'process_status' => 'in_progress'],
+                ['id' => 'doc-6', 'process_status' => 'waiting_for_capacity'],
+                ['id' => 'doc-7', 'process_status' => 'error'],
+                ['id' => 'doc-8', 'process_status' => 'missing_content'],
             ],
         ]),
-        'api.mistral.ai/v1/libraries/lib-123' => Http::response(fakeMistralLibraryResponse(nbDocuments: 3)),
+        'api.mistral.ai/v1/libraries/lib-123' => Http::response(fakeMistralLibraryResponse(nbDocuments: 8)),
     ]);
 
     $store = Stores::get('lib-123', provider: 'mistral');
 
-    expect($store->fileCounts->completed)->toBe(0)
-        ->and($store->fileCounts->pending)->toBe(2)
-        ->and($store->fileCounts->failed)->toBe(1);
+    expect($store->fileCounts->completed)->toBe(3)
+        ->and($store->fileCounts->pending)->toBe(3)
+        ->and($store->fileCounts->failed)->toBe(2);
 });
 
 test('create store posts name and description', function () {
     Http::fake([
         'api.mistral.ai/v1/libraries' => Http::response(fakeMistralLibraryResponse()),
-        'api.mistral.ai/v1/libraries/lib-123' => Http::response(fakeMistralLibraryResponse()),
     ]);
 
     $store = Stores::create('Test Store', description: 'My documents', provider: 'mistral');
 
-    expect($store->id)->toBe('lib-123');
+    expect($store->id)->toBe('lib-123')
+        ->and($store->name)->toBe('Test Store');
+
+    Http::assertSentCount(1);
 
     Http::assertSent(fn (Request $request) => $request->method() === 'POST'
         && $request->url() === 'https://api.mistral.ai/v1/libraries'
@@ -209,7 +216,6 @@ test('create store posts name and description', function () {
 test('create store posts a falsy description', function () {
     Http::fake([
         'api.mistral.ai/v1/libraries' => Http::response(fakeMistralLibraryResponse()),
-        'api.mistral.ai/v1/libraries/lib-123' => Http::response(fakeMistralLibraryResponse()),
     ]);
 
     $store = Stores::create('Test Store', description: '0', provider: 'mistral');
@@ -225,7 +231,6 @@ test('create store posts a falsy description', function () {
 test('create store ignores unsupported idle expiration', function () {
     Http::fake([
         'api.mistral.ai/v1/libraries' => Http::response(fakeMistralLibraryResponse()),
-        'api.mistral.ai/v1/libraries/lib-123' => Http::response(fakeMistralLibraryResponse()),
     ]);
 
     Stores::create('Test Store', expiresWhenIdleFor: new DateInterval('P7D'), provider: 'mistral');
@@ -301,7 +306,7 @@ test('adding a storable file uploads it directly to the library', function () {
     Http::assertNotSent(fn (Request $request) => str_ends_with($request->url(), '/v1/files'));
 });
 
-test('adding a storable file with metadata patches the document attributes', function () {
+test('adding a storable file with metadata updates the document attributes', function () {
     Http::fake([
         'api.mistral.ai/v1/libraries/lib-123/documents/doc-1' => Http::response([
             'id' => 'doc-1',
@@ -324,12 +329,12 @@ test('adding a storable file with metadata patches the document attributes', fun
         && str_ends_with($request->url(), '/libraries/lib-123/documents')
         && collect($request->data())->pluck('name')->all() === ['file']);
 
-    Http::assertSent(fn (Request $request) => $request->method() === 'PATCH'
+    Http::assertSent(fn (Request $request) => $request->method() === 'PUT'
         && $request->url() === 'https://api.mistral.ai/v1/libraries/lib-123/documents/doc-1'
         && $request['attributes'] === ['team' => 'laravel', 'year' => 2026]);
 });
 
-test('adding a storable file without metadata does not patch the document', function () {
+test('adding a storable file without metadata does not update the document', function () {
     Http::fake([
         'api.mistral.ai/v1/libraries/lib-123/documents' => Http::response(['id' => 'doc-1'], 201),
         'api.mistral.ai/v1/libraries/lib-123' => Http::response(fakeMistralLibraryResponse()),
@@ -338,7 +343,7 @@ test('adding a storable file without metadata does not patch the document', func
     Stores::get('lib-123', provider: 'mistral')
         ->add(Document::fromString('Hello, world!', 'text/plain')->as('hello.txt'));
 
-    Http::assertNotSent(fn (Request $request) => $request->method() === 'PATCH');
+    Http::assertNotSent(fn (Request $request) => $request->method() === 'PUT');
 });
 
 test('adding an uploaded file uploads it directly to the library', function () {
@@ -371,10 +376,10 @@ test('adding a storable file dispatches the store file events', function () {
         ->add(Document::fromString('Hello, world!', 'text/plain')->as('hello.txt'));
 
     Event::assertDispatched(fn (AddingFileToStore $event) => $event->storeId === 'lib-123'
-        && $event->fileId === 'hello.txt');
+        && $event->fileId === null);
 
     Event::assertDispatched(fn (FileAddedToStore $event) => $event->storeId === 'lib-123'
-        && $event->fileId === 'hello.txt'
+        && $event->fileId === null
         && $event->documentId === 'doc-1');
 });
 

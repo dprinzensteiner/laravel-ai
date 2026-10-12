@@ -8,14 +8,18 @@ use Laravel\Ai\Attributes\Temperature;
 use Laravel\Ai\Attributes\TopP;
 use Laravel\Ai\Contracts\HasTools;
 use Laravel\Ai\Exceptions\AiException;
+use Laravel\Ai\Exceptions\StreamErrorException;
 use Laravel\Ai\Files\Document;
 use Laravel\Ai\Files\RemoteImage;
 use Laravel\Ai\Providers\Tools\FileSearch;
+use Laravel\Ai\Streaming\Events\Error;
 use Laravel\Ai\Streaming\Events\StreamEnd;
 use Laravel\Ai\Streaming\Events\StreamStart;
 use Laravel\Ai\Streaming\Events\TextDelta;
 use Laravel\Ai\Streaming\Events\TextEnd;
 use Laravel\Ai\Streaming\Events\TextStart;
+use Laravel\Ai\Streaming\Events\ToolCall as ToolCallEvent;
+use Laravel\Ai\Streaming\Events\ToolResult as ToolResultEvent;
 use Tests\Fixtures\Agents\AssistantAgent;
 use Tests\Fixtures\Agents\StructuredAgent;
 use Tests\Fixtures\Agents\ToolChoiceAgent;
@@ -192,9 +196,20 @@ test('function calls in conversations trigger the tool loop', function () {
         ->and($hasFunctionResult)->toBeTrue();
 });
 
-test('streaming with file search emits synthetic text events', function () {
+test('streaming with file search streams conversation deltas', function () {
     Http::fake([
-        'api.mistral.ai/v1/conversations' => Http::response(fakeMistralConversationResponse()),
+        'api.mistral.ai/v1/conversations' => Http::response(
+            body: $this->ssePayload([
+                ['type' => 'conversation.response.started', 'conversation_id' => 'conv-123'],
+                ['type' => 'tool.execution.started', 'name' => 'document_library'],
+                ['type' => 'tool.execution.done', 'name' => 'document_library'],
+                ['type' => 'message.output.delta', 'id' => 'msg-1', 'model' => 'mistral-medium-latest', 'content' => 'Valkey is '],
+                ['type' => 'message.output.delta', 'id' => 'msg-1', 'model' => 'mistral-medium-latest', 'content' => ['type' => 'tool_reference', 'tool' => 'document_library', 'title' => 'roadmap.txt']],
+                ['type' => 'message.output.delta', 'id' => 'msg-1', 'model' => 'mistral-medium-latest', 'content' => 'mentioned.'],
+                ['type' => 'conversation.response.done', 'usage' => ['prompt_tokens' => 10, 'completion_tokens' => 5, 'total_tokens' => 15]],
+            ]),
+            headers: ['Content-Type' => 'text/event-stream'],
+        ),
     ]);
 
     $stream = agent(tools: [new FileSearch(['lib-123'])])
@@ -202,11 +217,75 @@ test('streaming with file search emits synthetic text events', function () {
 
     $events = iterator_to_array($stream, false);
 
-    expect($events[0])->toBeInstanceOf(StreamStart::class)
+    expect($events[0])->toBeInstanceOf(StreamStart::class)->model->toBe('mistral-medium-latest')
         ->and($events[1])->toBeInstanceOf(TextStart::class)
-        ->and($events[2])->toBeInstanceOf(TextDelta::class)->delta->toBe('Valkey is mentioned.')
-        ->and($events[3])->toBeInstanceOf(TextEnd::class)
-        ->and($events[4])->toBeInstanceOf(StreamEnd::class);
+        ->and($events[2])->toBeInstanceOf(TextDelta::class)->delta->toBe('Valkey is ')
+        ->and($events[3])->toBeInstanceOf(TextDelta::class)->delta->toBe('mentioned.')
+        ->and($events[4])->toBeInstanceOf(TextEnd::class)
+        ->and($events[5])->toBeInstanceOf(StreamEnd::class)
+        ->and($stream->usage->promptTokens)->toBe(10)
+        ->and($stream->usage->completionTokens)->toBe(5);
+
+    Http::assertSent(fn (Request $request) => $request->url() === 'https://api.mistral.ai/v1/conversations'
+        && $request['stream'] === true);
+});
+
+test('streamed conversation function calls trigger the tool loop', function () {
+    Http::fake([
+        'api.mistral.ai/v1/conversations' => Http::sequence([
+            Http::response(
+                body: $this->ssePayload([
+                    ['type' => 'function.call.delta', 'id' => 'fc-1', 'tool_call_id' => 'call-1', 'name' => 'FixedNumberGenerator', 'arguments' => '{'],
+                    ['type' => 'function.call.delta', 'id' => 'fc-1', 'tool_call_id' => 'call-1', 'name' => 'FixedNumberGenerator', 'arguments' => '}'],
+                    ['type' => 'conversation.response.done', 'usage' => ['prompt_tokens' => 10, 'completion_tokens' => 5]],
+                ]),
+                headers: ['Content-Type' => 'text/event-stream'],
+            ),
+            Http::response(
+                body: $this->ssePayload([
+                    ['type' => 'message.output.delta', 'id' => 'msg-1', 'content' => 'The number is 72019.'],
+                    ['type' => 'conversation.response.done', 'usage' => ['prompt_tokens' => 10, 'completion_tokens' => 5]],
+                ]),
+                headers: ['Content-Type' => 'text/event-stream'],
+            ),
+        ]),
+    ]);
+
+    $stream = agent(tools: [new FileSearch(['lib-123']), new FixedNumberGenerator])
+        ->stream('Generate a number', provider: 'mistral');
+
+    $events = collect(iterator_to_array($stream, false));
+
+    expect($events->whereInstanceOf(ToolCallEvent::class)->first()->toolCall->name)->toBe('FixedNumberGenerator')
+        ->and($events->whereInstanceOf(ToolResultEvent::class))->toHaveCount(1)
+        ->and($stream->text)->toBe('The number is 72019.');
+
+    $followUp = json_decode(Http::recorded()[1][0]->body(), true);
+
+    expect(collect($followUp['inputs'])->firstWhere('type', 'function.result')['tool_call_id'])->toBe('call-1');
+});
+
+test('streamed conversation errors emit an error event', function () {
+    Http::fake([
+        'api.mistral.ai/v1/conversations' => Http::response(
+            body: $this->ssePayload([
+                ['type' => 'conversation.response.error', 'message' => 'Library not found', 'code' => 404],
+            ]),
+            headers: ['Content-Type' => 'text/event-stream'],
+        ),
+    ]);
+
+    $error = null;
+
+    try {
+        iterator_to_array(agent(tools: [new FileSearch(['lib-123'])])->stream('Is Valkey mentioned?', provider: 'mistral'), false);
+    } catch (StreamErrorException $exception) {
+        $error = $exception->error;
+    }
+
+    expect($error)->toBeInstanceOf(Error::class)
+        ->and($error->type)->toBe('404')
+        ->and($error->message)->toBe('Library not found');
 });
 
 test('generation options map to conversation completion args', function () {

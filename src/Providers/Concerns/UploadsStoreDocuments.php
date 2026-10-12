@@ -3,8 +3,8 @@
 namespace Laravel\Ai\Providers\Concerns;
 
 use Laravel\Ai\Contracts\Files\StorableFile;
+use Laravel\Ai\Contracts\Gateway\StoreGateway;
 use Laravel\Ai\Contracts\Gateway\UploadsDocuments;
-use RuntimeException;
 
 trait UploadsStoreDocuments
 {
@@ -13,14 +13,11 @@ trait UploadsStoreDocuments
      */
     public function uploadDocumentToStore(string $storeId, StorableFile $file, array $metadata = []): string
     {
+        /** @var StoreGateway&UploadsDocuments $gateway */
         $gateway = $this->storeGateway();
 
-        if (! $gateway instanceof UploadsDocuments) {
-            throw new RuntimeException('The provider\'s store gateway does not support direct document uploads.');
-        }
-
         return $this->dispatchFileAddition(
-            $storeId, $file->name() ?? '',
+            $storeId, null,
             fn () => $gateway->uploadDocument($this, $storeId, $file, $metadata),
         );
     }

@@ -30,11 +30,6 @@ use Laravel\Ai\Responses\Data\TranscriptionSegment;
 use Laravel\Ai\Responses\Data\Usage;
 use Laravel\Ai\Responses\EmbeddingsResponse;
 use Laravel\Ai\Responses\TranscriptionResponse;
-use Laravel\Ai\Streaming\Events\StreamStart;
-use Laravel\Ai\Streaming\Events\TextDelta;
-use Laravel\Ai\Streaming\Events\TextEnd;
-use Laravel\Ai\Streaming\Events\TextStart;
-use Laravel\Ai\Streaming\Events\ToolCall as ToolCallEvent;
 use RuntimeException;
 
 class MistralGateway implements AudioGateway, EmbeddingGateway, StepTextGateway, TranscriptionGateway
@@ -42,6 +37,7 @@ class MistralGateway implements AudioGateway, EmbeddingGateway, StepTextGateway,
     use Concerns\BuildsConversationRequests;
     use Concerns\BuildsTextRequests;
     use Concerns\CreatesMistralClient;
+    use Concerns\HandlesConversationStreaming;
     use Concerns\HandlesTextStreaming;
     use Concerns\MapsAttachments;
     use Concerns\ParsesConversationResponses;
@@ -285,14 +281,11 @@ class MistralGateway implements AudioGateway, EmbeddingGateway, StepTextGateway,
 
         $this->validateConversationResponse($data);
 
-        return $this->parseConversationResponse($data, $provider, $model, filled($schema));
+        return $this->parseConversationResponse($data, $provider, $model, filled($schema))->withRawResponse($response);
     }
 
     /**
      * Stream text for a single step via the Conversations API.
-     *
-     * The Conversations request executes without streaming; the resulting
-     * text is emitted as a single delta.
      */
     protected function streamConversationStep(
         string $invocationId,
@@ -305,24 +298,17 @@ class MistralGateway implements AudioGateway, EmbeddingGateway, StepTextGateway,
         ?TextGenerationOptions $options,
         ?int $timeout,
     ): Generator {
-        $step = $this->generateConversationStep($provider, $model, $instructions, $messages, $tools, $schema, $options, $timeout);
+        $body = $this->buildConversationRequestBody($provider, $model, $instructions, $messages, $tools, $schema, $options);
 
-        $messageId = $this->generateEventId();
+        $body['stream'] = true;
 
-        yield (new StreamStart(
-            $this->generateEventId(), $provider->name(), $step->meta->model, time(),
-        ))->withInvocationId($invocationId);
+        $response = $this->withErrorHandling(
+            $provider->name(),
+            fn () => $this->client($provider, $timeout)
+                ->withOptions(['stream' => true])
+                ->post('conversations', $body),
+        );
 
-        if (filled($step->text)) {
-            yield (new TextStart($this->generateEventId(), $messageId, time()))->withInvocationId($invocationId);
-            yield (new TextDelta($this->generateEventId(), $messageId, $step->text, time()))->withInvocationId($invocationId);
-            yield (new TextEnd($this->generateEventId(), $messageId, time()))->withInvocationId($invocationId);
-        }
-
-        foreach ($step->toolCalls as $toolCall) {
-            yield (new ToolCallEvent($this->generateEventId(), $toolCall, time()))->withInvocationId($invocationId);
-        }
-
-        return $step;
+        return yield from $this->processConversationStream($invocationId, $provider, $model, $response->getBody());
     }
 }

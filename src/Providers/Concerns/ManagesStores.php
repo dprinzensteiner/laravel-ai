@@ -72,7 +72,7 @@ trait ManagesStores
     /**
      * Dispatch the add-to-store lifecycle events around the given upload.
      */
-    protected function dispatchFileAddition(string $storeId, string $identifier, Closure $upload): string
+    protected function dispatchFileAddition(string $storeId, ?string $identifier, Closure $upload): string
     {
         $invocationId = (string) Str::uuid7();
 

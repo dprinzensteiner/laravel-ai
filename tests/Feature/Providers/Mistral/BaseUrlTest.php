@@ -100,7 +100,7 @@ test('mistral store requests use the configured base url', function (): void {
         default => Http::response(['unexpected_url' => $request->url()], 500),
     });
 
-    $store = Stores::create('Local Store', provider: 'mistral');
+    $store = Stores::create('Local Store', provider: 'mistral')->refresh();
     $document = $store->add(Document::fromString('Hello, World!', 'text/plain')->as('hello.txt'));
     $removed = $store->remove($document->id());
     $deleted = $store->delete();
