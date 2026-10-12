@@ -119,7 +119,6 @@ test('get store paginates every document even when nb_documents is stale', funct
 
             return Http::response(['data' => $page === 0 ? $firstPage : $secondPage]);
         },
-        // nb_documents lags the documents actually returned (eventual consistency)...
         'api.mistral.ai/v1/libraries/lib-123' => Http::response(fakeMistralLibraryResponse(nbDocuments: 100)),
     ]);
 
@@ -146,7 +145,6 @@ test('get store stops paginating when the api reports no more pages', function (
 
     expect($store->fileCounts->completed)->toBe(100);
 
-    // One library request and a single documents page...
     Http::assertSentCount(2);
 });
 
@@ -302,7 +300,6 @@ test('adding a storable file uploads it directly to the library', function () {
             && collect($request->data())->contains(fn ($part) => $part['name'] === 'file' && ($part['filename'] ?? null) === 'hello.txt');
     });
 
-    // No global /v1/files upload happened...
     Http::assertNotSent(fn (Request $request) => str_ends_with($request->url(), '/v1/files'));
 });
 
@@ -324,7 +321,6 @@ test('adding a storable file with metadata updates the document attributes', fun
 
     expect($response->id)->toBe('doc-1');
 
-    // The multipart upload itself only carries the file...
     Http::assertSent(fn (Request $request) => $request->method() === 'POST'
         && str_ends_with($request->url(), '/libraries/lib-123/documents')
         && collect($request->data())->pluck('name')->all() === ['file']);

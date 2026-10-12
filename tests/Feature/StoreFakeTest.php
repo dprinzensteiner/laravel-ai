@@ -286,7 +286,6 @@ describe('file assertions', function (): void {
         $store->add(Document::fromString('First document', 'text/plain'));
         $store->add(Document::fromString('Second document', 'text/plain'));
 
-        // Distinct nameless documents no longer collide onto a single fake id...
         $store->assertAdded('First document');
         $store->assertAdded('Second document');
         $store->assertNotAdded('Third document');

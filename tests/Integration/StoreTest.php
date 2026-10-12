@@ -89,27 +89,22 @@ test('can create store with expiration', function (string $provider, string $api
 test('can add and remove file from store', function (string $provider, string $apiKey): void {
     requiresApiKey($apiKey);
 
-    // Create a store...
     $store = Stores::create('File Test Store', provider: $provider);
 
-    // Add a document to the store...
     $documentId = $store->add(
         Document::fromString('This is test content for the vector store.', 'text/plain')->as('test.txt'),
     );
 
     expect($documentId)->not->toBeEmpty();
 
-    // Refresh the store to see updated file counts...
     $refreshed = $store->refresh();
 
     expect($refreshed->fileCounts->completed + $refreshed->fileCounts->pending)->toBeGreaterThanOrEqual(0);
 
-    // Remove the file from the store....
     $removed = $store->remove($documentId, deleteFile: true);
 
     expect($removed)->toBeTrue();
 
-    // Clean up...
     $store->delete();
 })->with('store-providers');
 
